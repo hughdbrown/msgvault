@@ -160,119 +160,159 @@ func sumAggregateStats(rows []query.AggregateRow) (count, size, attachments int6
 	return
 }
 
+// -----------------------------------------------------------------------------
+// Key Event Helpers - reduce verbosity of tea.KeyMsg construction
+// -----------------------------------------------------------------------------
+
+// key returns a KeyMsg for a single rune (e.g., key('x'), key(' '))
+func key(r rune) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+}
+
+// keyEnter returns a KeyMsg for the Enter key
+func keyEnter() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyEnter}
+}
+
+// keyEsc returns a KeyMsg for the Escape key
+func keyEsc() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyEscape}
+}
+
+// keyTab returns a KeyMsg for the Tab key
+func keyTab() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyTab}
+}
+
+// keyDown returns a KeyMsg for the Down arrow key
+func keyDown() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyDown}
+}
+
+// keyShiftTab returns a KeyMsg for Shift+Tab
+func keyShiftTab() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyShiftTab}
+}
+
+// keyLeft returns a KeyMsg for the Left arrow key
+func keyLeft() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyLeft}
+}
+
+// keyRight returns a KeyMsg for the Right arrow key
+func keyRight() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRight}
+}
+
+// keyHome returns a KeyMsg for the Home key
+func keyHome() tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyHome}
+}
+
+// -----------------------------------------------------------------------------
+// Data Factories - create test data with minimal boilerplate
+// -----------------------------------------------------------------------------
+
+// makeRow creates an AggregateRow with the given key and count.
+func makeRow(key string, count int) query.AggregateRow {
+	return query.AggregateRow{Key: key, Count: int64(count)}
+}
+
+// assertSelected checks that the given key is selected.
+func assertSelected(t *testing.T, m Model, key string) {
+	t.Helper()
+	if !m.selection.AggregateKeys[key] {
+		t.Errorf("expected %q to be selected", key)
+	}
+}
+
+// assertNotSelected checks that the given key is not selected.
+func assertNotSelected(t *testing.T, m Model, key string) {
+	t.Helper()
+	if m.selection.AggregateKeys[key] {
+		t.Errorf("expected %q to not be selected", key)
+	}
+}
+
+// assertSelectionCount checks the number of selected items.
+func assertSelectionCount(t *testing.T, m Model, expected int) {
+	t.Helper()
+	got := len(m.selection.AggregateKeys)
+	if got != expected {
+		t.Errorf("expected %d selected items, got %d", expected, got)
+	}
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
 
 func TestSelectionToggle(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 10},
-			{Key: "bob@example.com", Count: 5},
-			{Key: "carol@example.com", Count: 3},
-		},
+	rows := []query.AggregateRow{
+		makeRow("alice@example.com", 10),
+		makeRow("bob@example.com", 5),
+		makeRow("carol@example.com", 3),
 	}
-
-	model := New(engine, "/tmp/test", "test123")
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
+	model := newTestModelWithRows(rows)
 
 	// Toggle selection with space
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ := model.handleAggregateKeys(key(' '))
 	model = newModel.(Model)
 
-	if !model.selection.AggregateKeys["alice@example.com"] {
-		t.Error("expected alice@example.com to be selected")
-	}
+	assertSelected(t, model, "alice@example.com")
 
 	// Toggle off
-	newModel, _ = model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ = model.handleAggregateKeys(key(' '))
 	model = newModel.(Model)
 
-	if model.selection.AggregateKeys["alice@example.com"] {
-		t.Error("expected alice@example.com to be deselected")
-	}
+	assertNotSelected(t, model, "alice@example.com")
 }
 
 func TestSelectAllVisible(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "row1", Count: 10},
-			{Key: "row2", Count: 9},
-			{Key: "row3", Count: 8},
-			{Key: "row4", Count: 7},
-			{Key: "row5", Count: 6},
-			{Key: "row6", Count: 5},
-		},
+	rows := []query.AggregateRow{
+		makeRow("row1", 10), makeRow("row2", 9), makeRow("row3", 8),
+		makeRow("row4", 7), makeRow("row5", 6), makeRow("row6", 5),
 	}
-
-	model := New(engine, "/tmp/test", "test123")
-	model.rows = engine.rows
+	model := newTestModelWithRows(rows)
 	model.pageSize = 3 // Only 3 rows visible
 	model.scrollOffset = 0
-	model.width = 100
-	model.height = 20
 
 	// Select all visible with 'S'
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	newModel, _ := model.handleAggregateKeys(key('S'))
 	model = newModel.(Model)
 
 	// Should only select first 3 (visible) rows
-	if len(model.selection.AggregateKeys) != 3 {
-		t.Errorf("expected 3 selected, got %d", len(model.selection.AggregateKeys))
-	}
-
-	if !model.selection.AggregateKeys["row1"] || !model.selection.AggregateKeys["row2"] || !model.selection.AggregateKeys["row3"] {
-		t.Error("expected row1, row2, row3 to be selected")
-	}
-
-	if model.selection.AggregateKeys["row4"] || model.selection.AggregateKeys["row5"] || model.selection.AggregateKeys["row6"] {
-		t.Error("expected row4, row5, row6 to NOT be selected")
-	}
+	assertSelectionCount(t, model, 3)
+	assertSelected(t, model, "row1")
+	assertSelected(t, model, "row2")
+	assertSelected(t, model, "row3")
+	assertNotSelected(t, model, "row4")
+	assertNotSelected(t, model, "row5")
+	assertNotSelected(t, model, "row6")
 }
 
 func TestSelectAllVisibleWithScroll(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "row1", Count: 10},
-			{Key: "row2", Count: 9},
-			{Key: "row3", Count: 8},
-			{Key: "row4", Count: 7},
-			{Key: "row5", Count: 6},
-			{Key: "row6", Count: 5},
-		},
+	rows := []query.AggregateRow{
+		makeRow("row1", 10), makeRow("row2", 9), makeRow("row3", 8),
+		makeRow("row4", 7), makeRow("row5", 6), makeRow("row6", 5),
 	}
-
-	model := New(engine, "/tmp/test", "test123")
-	model.rows = engine.rows
+	model := newTestModelWithRows(rows)
 	model.pageSize = 3
 	model.scrollOffset = 2 // Scrolled down, showing row3-row5
-	model.width = 100
-	model.height = 20
 
 	// Select all visible with 'S'
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	newModel, _ := model.handleAggregateKeys(key('S'))
 	model = newModel.(Model)
 
 	// Should only select visible rows (row3, row4, row5)
-	if len(model.selection.AggregateKeys) != 3 {
-		t.Errorf("expected 3 selected, got %d", len(model.selection.AggregateKeys))
-	}
-
-	if model.selection.AggregateKeys["row1"] || model.selection.AggregateKeys["row2"] {
-		t.Error("expected row1, row2 to NOT be selected (not visible)")
-	}
-
-	if !model.selection.AggregateKeys["row3"] || !model.selection.AggregateKeys["row4"] || !model.selection.AggregateKeys["row5"] {
-		t.Error("expected row3, row4, row5 to be selected")
-	}
-
-	if model.selection.AggregateKeys["row6"] {
-		t.Error("expected row6 to NOT be selected (not visible)")
-	}
+	assertSelectionCount(t, model, 3)
+	assertNotSelected(t, model, "row1")
+	assertNotSelected(t, model, "row2")
+	assertSelected(t, model, "row3")
+	assertSelected(t, model, "row4")
+	assertSelected(t, model, "row5")
+	assertNotSelected(t, model, "row6")
 }
 
 func TestSelectionClearedOnViewSwitch(t *testing.T) {
@@ -290,7 +330,7 @@ func TestSelectionClearedOnViewSwitch(t *testing.T) {
 
 	// Select an item
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ := model.handleAggregateKeys(key(' '))
 	model = newModel.(Model)
 
 	if len(model.selection.AggregateKeys) != 1 {
@@ -298,7 +338,7 @@ func TestSelectionClearedOnViewSwitch(t *testing.T) {
 	}
 
 	// Switch view with Tab
-	newModel, _ = model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyTab})
+	newModel, _ = model.handleAggregateKeys(keyTab())
 	model = newModel.(Model)
 
 	// Selection should be cleared
@@ -327,11 +367,11 @@ func TestSelectionClearedOnShiftTab(t *testing.T) {
 
 	// Select an item
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ := model.handleAggregateKeys(key(' '))
 	model = newModel.(Model)
 
 	// Switch view with Shift+Tab
-	newModel, _ = model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyShiftTab})
+	newModel, _ = model.handleAggregateKeys(keyShiftTab())
 	model = newModel.(Model)
 
 	// Selection should be cleared
@@ -355,7 +395,7 @@ func TestClearSelection(t *testing.T) {
 
 	// Select an item
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ := model.handleAggregateKeys(key(' '))
 	model = newModel.(Model)
 
 	if len(model.selection.AggregateKeys) != 1 {
@@ -363,7 +403,7 @@ func TestClearSelection(t *testing.T) {
 	}
 
 	// Clear with 'x'
-	newModel, _ = model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	newModel, _ = model.handleAggregateKeys(key('x'))
 	model = newModel.(Model)
 
 	if len(model.selection.AggregateKeys) != 0 {
@@ -387,11 +427,11 @@ func TestStageForDeletionWithAggregateSelection(t *testing.T) {
 
 	// Select an aggregate
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ := model.handleAggregateKeys(key(' '))
 	model = newModel.(Model)
 
 	// Stage for deletion with 'D'
-	newModel, _ = model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	newModel, _ = model.handleAggregateKeys(key('D'))
 	model = newModel.(Model)
 
 	// Should show confirmation modal
@@ -431,7 +471,7 @@ func TestStageForDeletionWithAccountFilter(t *testing.T) {
 
 	// Select an aggregate
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ := model.handleAggregateKeys(key(' '))
 	model = newModel.(Model)
 
 	// Stage for deletion
@@ -467,7 +507,7 @@ func TestStageForDeletionWithSingleAccount(t *testing.T) {
 
 	// Select an aggregate
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ := model.handleAggregateKeys(key(' '))
 	model = newModel.(Model)
 
 	// Stage for deletion
@@ -504,7 +544,7 @@ func TestStageForDeletionWithMultipleAccountsNoFilter(t *testing.T) {
 
 	// Select an aggregate
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ := model.handleAggregateKeys(key(' '))
 	model = newModel.(Model)
 
 	// Stage for deletion
@@ -543,7 +583,7 @@ func TestStageForDeletionWithAccountFilterNotFound(t *testing.T) {
 
 	// Select an aggregate
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ := model.handleAggregateKeys(key(' '))
 	model = newModel.(Model)
 
 	// Stage for deletion - should proceed despite filter not found
@@ -582,7 +622,7 @@ func TestAKeyShowsAllMessages(t *testing.T) {
 	model.height = 20
 
 	// Press 'a' - should go to all messages view
-	newModel, cmd := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	newModel, cmd := model.handleAggregateKeys(key('a'))
 	model = newModel.(Model)
 
 	// Should navigate to message list with no filter
@@ -616,7 +656,7 @@ func TestModalDismiss(t *testing.T) {
 	model.height = 20
 
 	// Any key should dismiss result modal
-	newModel, _ := model.handleModalKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	newModel, _ := model.handleModalKeys(key('x'))
 	model = newModel.(Model)
 
 	if model.modal != ModalNone {
@@ -639,7 +679,7 @@ func TestConfirmModalCancel(t *testing.T) {
 	model.height = 20
 
 	// 'n' should cancel
-	newModel, _ := model.handleModalKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	newModel, _ := model.handleModalKeys(key('n'))
 	model = newModel.(Model)
 
 	if model.modal != ModalNone {
@@ -792,7 +832,7 @@ func TestDetailLineCountResetOnLoad(t *testing.T) {
 
 	// Trigger drill-down to detail view
 	model.cursor = 0
-	newModel, _ := model.handleMessageListKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ := model.handleMessageListKeys(keyEnter())
 	m := newModel.(Model)
 
 	// detailLineCount and detailScroll should be reset
@@ -889,7 +929,7 @@ func TestEndKeyWithZeroLineCount(t *testing.T) {
 	model.detailScroll = 0
 
 	// Press 'G' (end key) with zero line count
-	newModel, _ := model.handleMessageDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	newModel, _ := model.handleMessageDetailKeys(key('G'))
 	m := newModel.(Model)
 
 	// Should not crash and scroll should remain 0
@@ -907,7 +947,7 @@ func TestQuitConfirmationModal(t *testing.T) {
 	model.height = 20
 
 	// Press 'q' should open quit confirmation, not quit immediately
-	newModel, cmd := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	newModel, cmd := model.handleAggregateKeys(key('q'))
 	m := newModel.(Model)
 
 	if m.modal != ModalQuitConfirm {
@@ -921,7 +961,7 @@ func TestQuitConfirmationModal(t *testing.T) {
 	}
 
 	// Press 'n' to cancel
-	newModel, _ = m.handleModalKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	newModel, _ = m.handleModalKeys(key('n'))
 	m = newModel.(Model)
 
 	if m.modal != ModalNone {
@@ -939,7 +979,7 @@ func TestQuitConfirmationConfirm(t *testing.T) {
 	model.height = 20
 
 	// Press 'y' to confirm quit
-	newModel, cmd := model.handleModalKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	newModel, cmd := model.handleModalKeys(key('y'))
 	m := newModel.(Model)
 
 	if !m.quitting {
@@ -963,7 +1003,7 @@ func TestAccountSelectorModal(t *testing.T) {
 	model.height = 20
 
 	// Press 'A' to open account selector
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	newModel, _ := model.handleAggregateKeys(key('A'))
 	m := newModel.(Model)
 
 	if m.modal != ModalAccountSelector {
@@ -974,14 +1014,14 @@ func TestAccountSelectorModal(t *testing.T) {
 	}
 
 	// Navigate down
-	newModel, _ = m.handleModalKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	newModel, _ = m.handleModalKeys(key('j'))
 	m = newModel.(Model)
 	if m.modalCursor != 1 {
 		t.Errorf("expected modalCursor = 1, got %d", m.modalCursor)
 	}
 
 	// Select account
-	newModel, cmd := m.handleModalKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, cmd := m.handleModalKeys(keyEnter())
 	m = newModel.(Model)
 
 	if m.modal != ModalNone {
@@ -1005,7 +1045,7 @@ func TestAttachmentFilterModal(t *testing.T) {
 	model.attachmentFilter = false
 
 	// Press 'f' to open filter modal
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	newModel, _ := model.handleAggregateKeys(key('f'))
 	m := newModel.(Model)
 
 	if m.modal != ModalAttachmentFilter {
@@ -1016,14 +1056,14 @@ func TestAttachmentFilterModal(t *testing.T) {
 	}
 
 	// Navigate down to "With Attachments"
-	newModel, _ = m.handleModalKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	newModel, _ = m.handleModalKeys(key('j'))
 	m = newModel.(Model)
 	if m.modalCursor != 1 {
 		t.Errorf("expected modalCursor = 1, got %d", m.modalCursor)
 	}
 
 	// Select "With Attachments"
-	newModel, _ = m.handleModalKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ = m.handleModalKeys(keyEnter())
 	m = newModel.(Model)
 
 	if m.modal != ModalNone {
@@ -1045,7 +1085,7 @@ func TestAttachmentFilterInMessageList(t *testing.T) {
 	model.attachmentFilter = false
 
 	// Press 'f' to open filter modal in message list
-	newModel, _ := model.handleMessageListKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	newModel, _ := model.handleMessageListKeys(key('f'))
 	m := newModel.(Model)
 
 	if m.modal != ModalAttachmentFilter {
@@ -1054,7 +1094,7 @@ func TestAttachmentFilterInMessageList(t *testing.T) {
 
 	// Select "With Attachments" and verify reload is triggered
 	m.modalCursor = 1
-	newModel, cmd := m.handleModalKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, cmd := m.handleModalKeys(keyEnter())
 	m = newModel.(Model)
 
 	if !m.attachmentFilter {
@@ -1085,7 +1125,7 @@ func TestSubGroupingNavigation(t *testing.T) {
 	model.viewType = query.ViewSenders
 
 	// Press Enter to drill into first sender - should go to message list (not sub-aggregate)
-	newModel, cmd := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, cmd := model.handleAggregateKeys(keyEnter())
 	m := newModel.(Model)
 
 	if m.level != LevelMessageList {
@@ -1111,7 +1151,7 @@ func TestSubGroupingNavigation(t *testing.T) {
 
 	// Test Tab from message list goes to sub-aggregate view
 	m.messages = engine.messages // Simulate messages loaded
-	newModel, cmd = m.handleMessageListKeys(tea.KeyMsg{Type: tea.KeyTab})
+	newModel, cmd = m.handleMessageListKeys(keyTab())
 	m = newModel.(Model)
 
 	if m.level != LevelSubAggregate {
@@ -1127,7 +1167,7 @@ func TestSubGroupingNavigation(t *testing.T) {
 
 	// Test Tab in sub-aggregate cycles views (skipping drill view type)
 	m.rows = engine.rows // Simulate data loaded
-	newModel, cmd = m.handleSubAggregateKeys(tea.KeyMsg{Type: tea.KeyTab})
+	newModel, cmd = m.handleSubAggregateKeys(keyTab())
 	m = newModel.(Model)
 
 	// Should skip Senders (drill view type) and go to Domains
@@ -1140,7 +1180,7 @@ func TestSubGroupingNavigation(t *testing.T) {
 
 	// Test Esc goes back to message list (not all the way to aggregates)
 	m.rows = engine.rows
-	newModel, _ = m.handleSubAggregateKeys(tea.KeyMsg{Type: tea.KeyEsc})
+	newModel, _ = m.handleSubAggregateKeys(keyEsc())
 	m = newModel.(Model)
 
 	if m.level != LevelMessageList {
@@ -1157,7 +1197,7 @@ func TestSubGroupingNavigation(t *testing.T) {
 
 	// Test Esc again goes back to aggregates
 	m.messages = engine.messages
-	newModel, _ = m.handleMessageListKeys(tea.KeyMsg{Type: tea.KeyEsc})
+	newModel, _ = m.handleMessageListKeys(keyEsc())
 	m = newModel.(Model)
 
 	if m.level != LevelAggregates {
@@ -1254,7 +1294,7 @@ func TestSubAggregateDrillDown(t *testing.T) {
 	model.rows = engine.rows
 
 	// Press Enter on recipient - should go to message list with combined filter
-	newModel, cmd := model.handleSubAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, cmd := model.handleSubAggregateKeys(keyEnter())
 	m := newModel.(Model)
 
 	if m.level != LevelMessageList {
@@ -1287,7 +1327,7 @@ func TestSearchModalOpen(t *testing.T) {
 	model.rows = engine.rows
 
 	// Press '/' to activate inline search
-	newModel, cmd := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	newModel, cmd := model.handleAggregateKeys(key('/'))
 	m := newModel.(Model)
 
 	if !m.inlineSearchActive {
@@ -1386,7 +1426,7 @@ func TestInlineSearchTabToggleAtMessageList(t *testing.T) {
 	model.messages = []query.MessageSummary{{ID: 1, Subject: "Existing"}} // Simulate existing results
 
 	// Press Tab to toggle to Deep mode
-	newModel, cmd := model.handleInlineSearchKeys(tea.KeyMsg{Type: tea.KeyTab})
+	newModel, cmd := model.handleInlineSearchKeys(keyTab())
 	m := newModel.(Model)
 
 	// Mode should toggle to Deep
@@ -1427,7 +1467,7 @@ func TestInlineSearchTabToggleNoQueryNoSearch(t *testing.T) {
 	model.searchInput.SetValue("") // Empty query
 
 	// Press Tab to toggle mode
-	newModel, cmd := model.handleInlineSearchKeys(tea.KeyMsg{Type: tea.KeyTab})
+	newModel, cmd := model.handleInlineSearchKeys(keyTab())
 	m := newModel.(Model)
 
 	// Mode should still toggle
@@ -1459,7 +1499,7 @@ func TestInlineSearchTabAtAggregateLevel(t *testing.T) {
 	model.searchInput.SetValue("test query")
 
 	// Press Tab - should do nothing at aggregate level
-	newModel, cmd := model.handleInlineSearchKeys(tea.KeyMsg{Type: tea.KeyTab})
+	newModel, cmd := model.handleInlineSearchKeys(keyTab())
 	m := newModel.(Model)
 
 	// Mode should NOT toggle (Tab disabled at aggregate level)
@@ -1486,7 +1526,7 @@ func TestInlineSearchTabToggleBackToFast(t *testing.T) {
 	model.searchInput.SetValue("test query")
 
 	// Press Tab to toggle back to Fast mode
-	newModel, cmd := model.handleInlineSearchKeys(tea.KeyMsg{Type: tea.KeyTab})
+	newModel, cmd := model.handleInlineSearchKeys(keyTab())
 	m := newModel.(Model)
 
 	// Mode should toggle back to Fast
@@ -1588,7 +1628,7 @@ func TestSearchFromSubAggregate(t *testing.T) {
 	model.rows = engine.rows
 
 	// Press '/' to activate inline search
-	newModel, cmd := model.handleSubAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	newModel, cmd := model.handleSubAggregateKeys(key('/'))
 	m := newModel.(Model)
 
 	if !m.inlineSearchActive {
@@ -1615,7 +1655,7 @@ func TestSearchFromMessageList(t *testing.T) {
 	model.messages = engine.messages
 
 	// Press '/' to activate inline search
-	newModel, cmd := model.handleMessageListKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	newModel, cmd := model.handleMessageListKeys(key('/'))
 	m := newModel.(Model)
 
 	if !m.inlineSearchActive {
@@ -1646,7 +1686,7 @@ func TestGKeyCyclesViewType(t *testing.T) {
 	model.scrollOffset = 3
 
 	// Press 'g' - should cycle to Recipients (not go to home)
-	newModel, cmd := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	newModel, cmd := model.handleAggregateKeys(key('g'))
 	m := newModel.(Model)
 
 	// Expected: viewType changes to ViewRecipients
@@ -1694,7 +1734,7 @@ func TestGKeyCyclesViewTypeFullCycle(t *testing.T) {
 	}
 
 	for i, expected := range expectedOrder {
-		newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+		newModel, _ := model.handleAggregateKeys(key('g'))
 		model = newModel.(Model)
 		model.loading = false // Reset for next iteration
 
@@ -1723,7 +1763,7 @@ func TestGKeyInSubAggregate(t *testing.T) {
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
 
 	// Press 'g' - should cycle to next view type, skipping drillViewType
-	newModel, _ := model.handleSubAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	newModel, _ := model.handleSubAggregateKeys(key('g'))
 	m := newModel.(Model)
 
 	// Should skip ViewSenders (the drillViewType) and go to Domains
@@ -1757,7 +1797,7 @@ func TestGKeyInMessageListWithDrillFilter(t *testing.T) {
 	model.viewType = query.ViewSenders
 
 	// Press 'g' - should switch to sub-aggregate view
-	newModel, _ := model.handleMessageListKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	newModel, _ := model.handleMessageListKeys(key('g'))
 	m := newModel.(Model)
 
 	if m.level != LevelSubAggregate {
@@ -1790,7 +1830,7 @@ func TestGKeyInMessageListNoDrillFilter(t *testing.T) {
 	// No drill filter - 'g' should go back to aggregates
 
 	// Press 'g' - should go back to aggregate view
-	newModel, _ := model.handleMessageListKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	newModel, _ := model.handleMessageListKeys(key('g'))
 	m := newModel.(Model)
 
 	// Should transition to aggregate level
@@ -1847,7 +1887,7 @@ func TestStatsUpdateOnDrillDown(t *testing.T) {
 	model.cursor = 0
 
 	// Press Enter to drill down into alice's messages
-	newModel, cmd := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, cmd := model.handleAggregateKeys(keyEnter())
 	m := newModel.(Model)
 
 	// Verify we transitioned to message list
@@ -1922,7 +1962,7 @@ func TestTabCyclesViewTypeAtAggregates(t *testing.T) {
 	model.scrollOffset = 3
 
 	// Press Tab - should cycle to Recipients
-	newModel, cmd := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyTab})
+	newModel, cmd := model.handleAggregateKeys(keyTab())
 	m := newModel.(Model)
 
 	if m.viewType != query.ViewRecipients {
@@ -1960,7 +2000,7 @@ func TestHomeKeyGoesToTop(t *testing.T) {
 	model.scrollOffset = 1
 
 	// Press 'home' - should go to top
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyHome})
+	newModel, _ := model.handleAggregateKeys(keyHome())
 	m := newModel.(Model)
 
 	if m.cursor != 0 {
@@ -1998,7 +2038,7 @@ func TestContextStatsSetOnDrillDown(t *testing.T) {
 	}
 
 	// Press Enter to drill down into alice's messages
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ := model.handleAggregateKeys(keyEnter())
 	m := newModel.(Model)
 
 	// Verify contextStats is set from selected row
@@ -2033,7 +2073,7 @@ func TestContextStatsClearedOnGoBack(t *testing.T) {
 	model.viewType = query.ViewSenders
 
 	// Drill down
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ := model.handleAggregateKeys(keyEnter())
 	m := newModel.(Model)
 
 	if m.contextStats == nil {
@@ -2071,7 +2111,7 @@ func TestContextStatsRestoredOnGoBackToSubAggregate(t *testing.T) {
 	model.viewType = query.ViewSenders
 
 	// Step 1: Drill down to message list (sets contextStats from alice's row)
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ := model.handleAggregateKeys(keyEnter())
 	m := newModel.(Model)
 	if m.contextStats == nil || m.contextStats.MessageCount != 100 {
 		t.Fatalf("expected contextStats.MessageCount=100, got %v", m.contextStats)
@@ -2084,7 +2124,7 @@ func TestContextStatsRestoredOnGoBackToSubAggregate(t *testing.T) {
 	originalContextStats := m.contextStats
 
 	// Step 2: Press Tab to go to sub-aggregate view (contextStats saved in breadcrumb)
-	newModel2, _ := m.handleMessageListKeys(tea.KeyMsg{Type: tea.KeyTab})
+	newModel2, _ := m.handleMessageListKeys(keyTab())
 	m2 := newModel2.(Model)
 	// Simulate data load completing with sub-aggregate rows
 	m2.rows = []query.AggregateRow{
@@ -2101,7 +2141,7 @@ func TestContextStatsRestoredOnGoBackToSubAggregate(t *testing.T) {
 	}
 
 	// Step 3: Drill down from sub-aggregate to message list (contextStats overwritten)
-	newModel3, _ := m2.handleSubAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel3, _ := m2.handleSubAggregateKeys(keyEnter())
 	m3 := newModel3.(Model)
 	if m3.level != LevelMessageList {
 		t.Fatalf("expected LevelMessageList after Enter, got %v", m3.level)
@@ -2347,7 +2387,7 @@ func TestHelpModalOpensWithQuestionMark(t *testing.T) {
 	model.modal = ModalNone
 
 	// Press '?'
-	newModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	newModel, _ := model.Update(key('?'))
 	m := newModel.(Model)
 
 	if m.modal != ModalHelp {
@@ -2363,7 +2403,7 @@ func TestHelpModalClosesOnAnyKey(t *testing.T) {
 	model.modal = ModalHelp
 
 	// Press any key (e.g., Enter)
-	newModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ := model.Update(keyEnter())
 	m := newModel.(Model)
 
 	if m.modal != ModalNone {
@@ -2380,7 +2420,7 @@ func TestVKeyReversesSortOrder(t *testing.T) {
 	model.rows = []query.AggregateRow{{Key: "test", Count: 1}}
 
 	// Press 'v'
-	newModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+	newModel, _ := model.Update(key('v'))
 	m := newModel.(Model)
 
 	if m.sortDirection != query.SortAsc {
@@ -2388,7 +2428,7 @@ func TestVKeyReversesSortOrder(t *testing.T) {
 	}
 
 	// Press 'v' again
-	newModel2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+	newModel2, _ := m.Update(key('v'))
 	m2 := newModel2.(Model)
 
 	if m2.sortDirection != query.SortDesc {
@@ -2495,7 +2535,7 @@ func TestSearchResultsPreservesDrillDownContextStats(t *testing.T) {
 	model.cursor = 0 // alice@example.com: Count=100, TotalSize=1000, AttachmentCount=5
 
 	// Press Enter to drill down (sets contextStats from selected row)
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ := model.handleAggregateKeys(keyEnter())
 	m := newModel.(Model)
 
 	// Verify contextStats was set from selected row with full stats
@@ -2675,7 +2715,7 @@ func TestDrillDownWithSearchQueryUsesSearch(t *testing.T) {
 	model.cursor = 0                // alice@example.com
 
 	// Press Enter to drill down
-	newModel, cmd := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, cmd := model.handleAggregateKeys(keyEnter())
 	m := newModel.(Model)
 
 	// Should transition to message list
@@ -2712,7 +2752,7 @@ func TestDrillDownWithoutSearchQueryUsesLoadMessages(t *testing.T) {
 	model.searchQuery = "" // No search filter
 	model.cursor = 0
 
-	newModel, cmd := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, cmd := model.handleAggregateKeys(keyEnter())
 	m := newModel.(Model)
 
 	if m.level != LevelMessageList {
@@ -2745,7 +2785,7 @@ func TestSubAggregateDrillDownWithSearchQuery(t *testing.T) {
 	model.viewType = query.ViewLabels
 	model.cursor = 0
 
-	newModel, cmd := model.handleSubAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, cmd := model.handleSubAggregateKeys(keyEnter())
 	m := newModel.(Model)
 
 	if m.level != LevelMessageList {
@@ -2788,7 +2828,7 @@ func TestViewTypeRestoredAfterEscFromSubAggregate(t *testing.T) {
 	model.scrollOffset = 0
 
 	// Press Tab to go to sub-aggregate (changes viewType)
-	newModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	newModel, _ := model.Update(keyTab())
 	m := newModel.(Model)
 
 	if m.level != LevelSubAggregate {
@@ -2830,7 +2870,7 @@ func TestCursorScrollPreservedAfterGoBack(t *testing.T) {
 	}
 
 	// Drill down to message list (saves breadcrumb with cached rows)
-	newModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ := model.Update(keyEnter())
 	m := newModel.(Model)
 
 	if m.level != LevelMessageList {
@@ -2919,7 +2959,7 @@ func TestDrillFilterPreservedAfterMessageDetail(t *testing.T) {
 	model.cursor = 0
 
 	// Press Enter to go to message detail
-	newModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ := model.Update(keyEnter())
 	m := newModel.(Model)
 
 	if m.level != LevelMessageDetail {
@@ -3763,7 +3803,7 @@ func TestDetailNavigationPrevNext(t *testing.T) {
 	model.messageDetail = &query.MessageDetail{ID: 2, Subject: "Second message"}
 
 	// Press right arrow to go to next message in list (higher index)
-	newModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	newModel, cmd := model.Update(keyRight())
 	m := newModel.(Model)
 
 	if m.detailMessageIndex != 2 {
@@ -3782,7 +3822,7 @@ func TestDetailNavigationPrevNext(t *testing.T) {
 	// Press left arrow to go to previous message in list (lower index)
 	m.detailMessageIndex = 2
 	m.cursor = 2
-	newModel, cmd = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	newModel, cmd = m.Update(keyLeft())
 	m = newModel.(Model)
 
 	if m.detailMessageIndex != 1 {
@@ -3813,7 +3853,7 @@ func TestDetailNavigationAtBoundary(t *testing.T) {
 	model.messageDetail = &query.MessageDetail{ID: 1, Subject: "First message"}
 
 	// Press left arrow at first message - should show flash
-	newModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	newModel, cmd := model.Update(keyLeft())
 	m := newModel.(Model)
 
 	if m.detailMessageIndex != 0 {
@@ -3833,7 +3873,7 @@ func TestDetailNavigationAtBoundary(t *testing.T) {
 	m.messageDetail = &query.MessageDetail{ID: 2, Subject: "Second message"}
 
 	// Press right arrow at last message - should show flash
-	newModel, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	newModel, cmd = m.Update(keyRight())
 	m = newModel.(Model)
 
 	if m.detailMessageIndex != 1 {
@@ -3865,7 +3905,7 @@ func TestDetailNavigationHLKeys(t *testing.T) {
 	model.messageDetail = &query.MessageDetail{ID: 2, Subject: "Second"}
 
 	// Press 'l' to go to next message in list (higher index)
-	newModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	newModel, _ := model.Update(key('l'))
 	m := newModel.(Model)
 
 	if m.detailMessageIndex != 2 {
@@ -3875,7 +3915,7 @@ func TestDetailNavigationHLKeys(t *testing.T) {
 	// Reset and press 'h' to go to previous message in list (lower index)
 	m.detailMessageIndex = 1
 	m.cursor = 1
-	newModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	newModel, _ = m.Update(key('h'))
 	m = newModel.(Model)
 
 	if m.detailMessageIndex != 0 {
@@ -4016,7 +4056,7 @@ func TestDetailNavigationFromThreadView(t *testing.T) {
 	model.messageDetail = &query.MessageDetail{ID: 101, Subject: "Thread msg 2"}
 
 	// Press right arrow - should navigate within threadMessages
-	newModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	newModel, cmd := model.Update(keyRight())
 	m := newModel.(Model)
 
 	if m.detailMessageIndex != 2 {
@@ -4039,7 +4079,7 @@ func TestDetailNavigationFromThreadView(t *testing.T) {
 	// Press right again - now cursor should be at index 3 and scroll offset should adjust
 	m.detailMessageIndex = 2
 	m.threadCursor = 2
-	newModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	newModel, _ = m.Update(keyRight())
 	m = newModel.(Model)
 
 	if m.detailMessageIndex != 3 {
@@ -4055,7 +4095,7 @@ func TestDetailNavigationFromThreadView(t *testing.T) {
 	}
 
 	// Press left arrow - should navigate back
-	newModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	newModel, _ = m.Update(keyLeft())
 	m = newModel.(Model)
 
 	if m.detailMessageIndex != 2 {
@@ -4069,7 +4109,7 @@ func TestDetailNavigationFromThreadView(t *testing.T) {
 	m.detailMessageIndex = 1
 	m.threadCursor = 1
 	m.threadScrollOffset = 1 // Scroll offset is still 1 from before
-	newModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	newModel, _ = m.Update(keyLeft())
 	m = newModel.(Model)
 
 	if m.detailMessageIndex != 0 {
@@ -4179,7 +4219,7 @@ func TestScrollClampingAfterResize(t *testing.T) {
 	model.pageSize = 25 // Bigger page means lower max scroll
 
 	// Press down - should clamp first, then check boundary
-	newModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	newModel, _ := model.Update(keyDown())
 	m := newModel.(Model)
 
 	// detailScroll should be clamped to max (50 - 27 = 23 for detailPageSize)
@@ -4307,7 +4347,7 @@ func TestSubAggregateAKeyJumpsToMessages(t *testing.T) {
 	model.height = 20
 
 	// Press 'a' to jump to all messages (with drill filter)
-	newModel, cmd := model.handleSubAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	newModel, cmd := model.handleSubAggregateKeys(key('a'))
 	m := newModel.(Model)
 
 	// Should navigate to message list
@@ -4362,7 +4402,7 @@ func TestDKeyAutoSelectsCurrentRow(t *testing.T) {
 	}
 
 	// Press 'd' without selecting anything first
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	newModel, _ := model.handleAggregateKeys(key('d'))
 	m := newModel.(Model)
 
 	// Should have auto-selected current row
@@ -4401,7 +4441,7 @@ func TestDKeyWithExistingSelection(t *testing.T) {
 	model.selection.AggregateViewType = query.ViewSenders
 
 	// Press 'd' - should use existing selection, not auto-select current row
-	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	newModel, _ := model.handleAggregateKeys(key('d'))
 	m := newModel.(Model)
 
 	// Should still have alice selected
@@ -4444,7 +4484,7 @@ func TestMessageListDKeyAutoSelectsCurrentMessage(t *testing.T) {
 	}
 
 	// Press 'd' without selecting anything first
-	newModel, _ := model.handleMessageListKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	newModel, _ := model.handleMessageListKeys(key('d'))
 	m := newModel.(Model)
 
 	// Should have auto-selected current message
@@ -4476,7 +4516,7 @@ func TestExportAttachmentsModal(t *testing.T) {
 	}
 
 	// Press 'e' to open export modal
-	newModel, _ := model.handleMessageDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	newModel, _ := model.handleMessageDetailKeys(key('e'))
 	m := newModel.(Model)
 
 	if m.modal != ModalExportAttachments {
@@ -4492,35 +4532,35 @@ func TestExportAttachmentsModal(t *testing.T) {
 	}
 
 	// Test navigation - move cursor down
-	newModel, _ = m.handleModalKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	newModel, _ = m.handleModalKeys(key('j'))
 	m = newModel.(Model)
 	if m.exportCursor != 1 {
 		t.Errorf("expected exportCursor = 1, got %d", m.exportCursor)
 	}
 
 	// Test toggle selection with space
-	newModel, _ = m.handleModalKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel, _ = m.handleModalKeys(key(' '))
 	m = newModel.(Model)
 	if m.exportSelection[1] {
 		t.Error("expected attachment 1 to be deselected after space")
 	}
 
 	// Test select none
-	newModel, _ = m.handleModalKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	newModel, _ = m.handleModalKeys(key('n'))
 	m = newModel.(Model)
 	if m.exportSelection[0] || m.exportSelection[1] {
 		t.Error("expected all attachments to be deselected after 'n'")
 	}
 
 	// Test select all
-	newModel, _ = m.handleModalKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	newModel, _ = m.handleModalKeys(key('a'))
 	m = newModel.(Model)
 	if !m.exportSelection[0] || !m.exportSelection[1] {
 		t.Error("expected all attachments to be selected after 'a'")
 	}
 
 	// Test cancel with Esc
-	newModel, _ = m.handleModalKeys(tea.KeyMsg{Type: tea.KeyEsc})
+	newModel, _ = m.handleModalKeys(keyEsc())
 	m = newModel.(Model)
 	if m.modal != ModalNone {
 		t.Errorf("expected ModalNone after Esc, got %v", m.modal)
@@ -4545,7 +4585,7 @@ func TestExportAttachmentsNoAttachments(t *testing.T) {
 	}
 
 	// Press 'e' should show flash message, not modal
-	newModel, _ := model.handleMessageDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	newModel, _ := model.handleMessageDetailKeys(key('e'))
 	m := newModel.(Model)
 
 	if m.modal == ModalExportAttachments {
