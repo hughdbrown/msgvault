@@ -1,0 +1,5 @@
+review_guidelines = """
+Since this software is pre-alpha, do not worry about backward compatibility.
+
+We are using the latest production version of Go 1.25.5
+"""

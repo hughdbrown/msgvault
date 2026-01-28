@@ -1,0 +1,62 @@
+package cmd
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+	"github.com/wesm/msgvault/internal/query"
+	"github.com/wesm/msgvault/internal/store"
+)
+
+var listLabelsCmd = &cobra.Command{
+	Use:   "list-labels",
+	Short: "List all labels with message counts",
+	Long: `List all Gmail labels in your archive with message counts and sizes.
+
+Use this command to see how your email is organized by label. This includes
+both system labels (INBOX, SENT, etc.) and custom labels.
+
+Examples:
+  msgvault list-labels
+  msgvault list-labels --limit 50
+  msgvault list-labels --json`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		opts, err := parseCommonFlags()
+		if err != nil {
+			return err
+		}
+
+		// Open database
+		dbPath := cfg.DatabasePath()
+		s, err := store.Open(dbPath)
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		defer s.Close()
+
+		// Create query engine
+		engine := query.NewSQLiteEngine(s.DB())
+
+		// Execute aggregation
+		results, err := engine.AggregateByLabel(cmd.Context(), opts)
+		if err != nil {
+			return fmt.Errorf("aggregate by label: %w", err)
+		}
+
+		if len(results) == 0 {
+			fmt.Println("No labels found.")
+			return nil
+		}
+
+		if aggJSON {
+			return outputAggregateJSON(results)
+		}
+		outputAggregateTable(results, "Label")
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(listLabelsCmd)
+	addCommonAggregateFlags(listLabelsCmd)
+}

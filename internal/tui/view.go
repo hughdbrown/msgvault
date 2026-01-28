@@ -1,0 +1,1329 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
+	"github.com/wesm/msgvault/internal/query"
+)
+
+// Monochrome theme - works on any dark terminal
+var (
+	// Background colors for dark terminals
+	bgBase   = lipgloss.Color("#000000") // Pure black base
+	bgAlt    = lipgloss.Color("#181818") // Gray for alternating rows
+	bgCursor = lipgloss.Color("#282828") // Lighter for cursor
+
+	// Title bar style - bold with visible background
+	titleBarStyle = lipgloss.NewStyle().
+			Bold(true).
+			Background(lipgloss.Color("#333333")).
+			Foreground(lipgloss.Color("#ffffff")).
+			Padding(0, 1)
+
+	headerStyle = lipgloss.NewStyle().
+			Bold(true).
+			Reverse(true).
+			Padding(0, 1)
+
+	statsStyle = lipgloss.NewStyle().
+			Faint(true).
+			Background(bgBase).
+			Padding(0, 1)
+
+	// Spinner style - NOT faint so it's visible
+	spinnerStyle = lipgloss.NewStyle().
+			Bold(true).
+			Background(bgBase)
+
+	tableHeaderStyle = lipgloss.NewStyle().
+				Bold(true).
+				Background(bgBase)
+
+	// Separator line style for under headers
+	separatorStyle = lipgloss.NewStyle().
+			Faint(true).
+			Background(bgBase)
+
+	// Cursor row: subtle lighter background
+	cursorRowStyle = lipgloss.NewStyle().
+			Background(bgCursor)
+
+	// Selected (checked) rows: bold
+	selectedRowStyle = lipgloss.NewStyle().
+				Bold(true).
+				Background(bgBase)
+
+	// Normal rows need background to clear old content
+	normalRowStyle = lipgloss.NewStyle().
+			Background(bgBase)
+
+	// Alternating rows: very subtle gray background
+	altRowStyle = lipgloss.NewStyle().
+			Background(bgAlt)
+
+	footerStyle = lipgloss.NewStyle().
+			Faint(true).
+			Background(bgBase).
+			Padding(0, 1)
+
+	errorStyle = lipgloss.NewStyle().
+			Bold(true).
+			Background(bgBase)
+
+	loadingStyle = lipgloss.NewStyle().
+			Italic(true).
+			Background(bgBase)
+
+	selectedIndicatorStyle = lipgloss.NewStyle().
+				Bold(true)
+
+	modalStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			Padding(1, 2).
+			Background(bgBase)
+
+	modalTitleStyle = lipgloss.NewStyle().
+			Bold(true)
+
+	flashStyle = lipgloss.NewStyle().
+			Italic(true).
+			Foreground(lipgloss.Color("#ffcc00")). // Yellow/amber for visibility
+			Background(bgBase)
+)
+
+// viewTypeAbbrev returns view type name for column headers and top-level breadcrumb.
+func viewTypeAbbrev(vt query.ViewType) string {
+	switch vt {
+	case query.ViewSenders:
+		return "Sender"
+	case query.ViewRecipients:
+		return "Recipient"
+	case query.ViewDomains:
+		return "Domain"
+	case query.ViewLabels:
+		return "Label"
+	case query.ViewTime:
+		return "Time"
+	default:
+		return vt.String()
+	}
+}
+
+// viewTypePrefix returns a short prefix for drill-down breadcrumbs (e.g., "S:" for Sender).
+func viewTypePrefix(vt query.ViewType) string {
+	switch vt {
+	case query.ViewSenders:
+		return "S"
+	case query.ViewRecipients:
+		return "R"
+	case query.ViewDomains:
+		return "D"
+	case query.ViewLabels:
+		return "L"
+	case query.ViewTime:
+		return "T"
+	default:
+		s := vt.String()
+		if len(s) > 0 {
+			return s[:1]
+		}
+		return "?"
+	}
+}
+
+// headerView renders a two-level header:
+// Line 1: msgvault [version] - account
+// Line 2: breadcrumb | stats
+func (m Model) headerView() string {
+	// === LINE 1: Title bar ===
+	// Build title with version
+	titleText := "msgvault"
+	if m.version != "" && m.version != "unknown" {
+		// Show short version (first 7 chars of commit hash)
+		ver := m.version
+		if len(ver) > 7 {
+			ver = ver[:7]
+		}
+		titleText = fmt.Sprintf("msgvault [%s]", ver)
+	}
+
+	// Account indicator
+	var accountStr string
+	if m.accountFilter == nil {
+		accountStr = "All Accounts"
+	} else {
+		for _, acc := range m.accounts {
+			if acc.ID == *m.accountFilter {
+				accountStr = acc.Identifier
+				break
+			}
+		}
+	}
+
+	// Attachment filter indicator
+	if m.attachmentFilter {
+		accountStr += " [Attachments]"
+	}
+
+	// Build line 1: "msgvault [hash] - Account"
+	line1Content := fmt.Sprintf("%s - %s", titleText, accountStr)
+	line1 := titleBarStyle.Render(padRight(line1Content, m.width-2)) // -2 for padding
+
+	// === LINE 2: Breadcrumb and Stats ===
+	var breadcrumb string
+	switch m.level {
+	case LevelAggregates:
+		breadcrumb = viewTypeAbbrev(m.viewType)
+		if m.viewType == query.ViewTime {
+			breadcrumb += " (" + m.timeGranularity.String() + ")"
+		}
+	case LevelSubAggregate:
+		// Show drill context: "S: foo@example.com (by To)"
+		drillKey := m.drillFilterKey()
+		breadcrumb = fmt.Sprintf("%s: %s (by %s)", viewTypePrefix(m.drillViewType), truncateRunes(drillKey, 30), viewTypeAbbrev(m.viewType))
+		if m.viewType == query.ViewTime {
+			breadcrumb += " " + m.timeGranularity.String()
+		}
+	case LevelMessageList:
+		if m.searchQuery != "" {
+			// Search context shown in info bar, keep breadcrumb simple
+			breadcrumb = "Search Results"
+		} else if m.allMessages {
+			breadcrumb = "All Messages"
+		} else if m.hasDrillFilter() {
+			// Show drill path: "S: foo@example.com"
+			drillKey := m.drillFilterKey()
+			if m.filterKey != "" && m.filterKey != drillKey {
+				breadcrumb = fmt.Sprintf("%s: %s > %s: %s", viewTypePrefix(m.drillViewType), truncateRunes(drillKey, 20), viewTypePrefix(m.viewType), truncateRunes(m.filterKey, 20))
+			} else {
+				breadcrumb = fmt.Sprintf("%s: %s", viewTypePrefix(m.drillViewType), truncateRunes(drillKey, 40))
+			}
+		} else {
+			breadcrumb = fmt.Sprintf("%s: %s", viewTypePrefix(m.viewType), truncateRunes(m.filterKey, 40))
+		}
+	case LevelMessageDetail:
+		subject := m.pendingDetailSubject
+		if m.messageDetail != nil {
+			subject = m.messageDetail.Subject
+		}
+		breadcrumb = fmt.Sprintf("Message: %s", truncateRunes(subject, 50))
+	case LevelThreadView:
+		if m.threadTruncated {
+			breadcrumb = fmt.Sprintf("Thread (showing %d of %d+ messages)", len(m.threadMessages), len(m.threadMessages))
+		} else {
+			breadcrumb = fmt.Sprintf("Thread (%d messages)", len(m.threadMessages))
+		}
+	}
+
+	// Stats - show contextual when drilled down or search filter is active
+	var statsStr string
+	if m.contextStats != nil && (m.level == LevelMessageList || m.level == LevelSubAggregate || m.searchQuery != "") {
+		// Show "+" suffix when search has more results than loaded
+		msgsSuffix := ""
+		if m.searchTotalCount == -1 {
+			msgsSuffix = "+"
+		}
+		statsStr = fmt.Sprintf("%d%s msgs | %s | %d attchs",
+			m.contextStats.MessageCount,
+			msgsSuffix,
+			formatBytes(m.contextStats.TotalSize),
+			m.contextStats.AttachmentCount,
+		)
+	} else if m.stats != nil {
+		statsStr = fmt.Sprintf("%d msgs | %s | %d attchs",
+			m.stats.MessageCount,
+			formatBytes(m.stats.TotalSize),
+			m.stats.AttachmentCount,
+		)
+	}
+
+	// Build line 2
+	breadcrumbStyled := statsStyle.Render(" " + breadcrumb + " ")
+	statsStyled := statsStyle.Render(statsStr + " ")
+	gap2 := m.width - lipgloss.Width(breadcrumbStyled) - lipgloss.Width(statsStyled)
+	if gap2 < 0 {
+		gap2 = 0
+	}
+	line2 := breadcrumbStyled + strings.Repeat(" ", gap2) + statsStyled
+
+	return line1 + "\n" + line2
+}
+
+// aggregateTableView renders the aggregate data table.
+func (m Model) aggregateTableView() string {
+	if m.err != nil {
+		return m.fillScreen(errorStyle.Render(padRight(fmt.Sprintf("Error: %v", m.err), m.width)), 1)
+	}
+
+	if len(m.rows) == 0 && !m.loading {
+		return m.fillScreen(normalRowStyle.Render(padRight("No data", m.width)), 1)
+	}
+
+	var sb strings.Builder
+
+	// Calculate column widths (reserve 3 for selection indicator)
+	keyWidth := m.width - 43
+	if keyWidth < 20 {
+		keyWidth = 20
+	}
+	if keyWidth > 57 {
+		keyWidth = 57
+	}
+
+	// Header row with sort indicators
+	sortIndicator := func(field query.SortField) string {
+		if m.sortField == field {
+			if m.sortDirection == query.SortDesc {
+				return "↓"
+			}
+			return "↑"
+		}
+		return ""
+	}
+
+	// Use abbreviated view type for column header
+	viewLabel := viewTypeAbbrev(m.viewType)
+	if si := sortIndicator(query.SortByName); si != "" {
+		viewLabel += si
+	}
+
+	countLabel := "Count"
+	if si := sortIndicator(query.SortByCount); si != "" {
+		countLabel += si
+	}
+
+	sizeLabel := "Size"
+	if si := sortIndicator(query.SortBySize); si != "" {
+		sizeLabel += si
+	}
+
+	attachLabel := "Attchs"
+	if si := sortIndicator(query.SortByAttachmentSize); si != "" {
+		attachLabel += si
+	}
+
+	headerRow := fmt.Sprintf("   %-*s %10s %12s %12s",
+		keyWidth, viewLabel,
+		countLabel,
+		sizeLabel,
+		attachLabel,
+	)
+	sb.WriteString(tableHeaderStyle.Render(padRight(headerRow, m.width)))
+	sb.WriteString("\n")
+	sb.WriteString(separatorStyle.Render(strings.Repeat("─", m.width)))
+	sb.WriteString("\n")
+
+	// Data rows - show at most pageSize-1 to leave room for info line
+	endRow := m.scrollOffset + m.pageSize - 1
+	if endRow > len(m.rows) {
+		endRow = len(m.rows)
+	}
+
+	for i := m.scrollOffset; i < endRow; i++ {
+		row := m.rows[i]
+		isCursor := i == m.cursor
+		isChecked := m.selection.AggregateKeys[row.Key]
+
+		// Selection indicator with cursor pointer
+		var selIndicator string
+		if isCursor {
+			if isChecked {
+				selIndicator = selectedIndicatorStyle.Render("▶✓ ")
+			} else {
+				selIndicator = cursorRowStyle.Render("▶  ")
+			}
+		} else if isChecked {
+			selIndicator = selectedIndicatorStyle.Render(" ✓ ")
+		} else {
+			selIndicator = "   "
+		}
+
+		// Truncate key if needed (rune-aware)
+		key := truncateRunes(row.Key, keyWidth)
+
+		line := fmt.Sprintf("%-*s %10s %12s %12s",
+			keyWidth, key,
+			formatCount(row.Count),
+			formatBytes(row.TotalSize),
+			formatBytes(row.AttachmentSize),
+		)
+
+		var style lipgloss.Style
+		if isCursor {
+			style = cursorRowStyle
+		} else if isChecked {
+			style = selectedRowStyle
+		} else if i%2 == 0 {
+			style = normalRowStyle
+		} else {
+			style = altRowStyle
+		}
+
+		sb.WriteString(selIndicator)
+		sb.WriteString(style.Render(padRight(line, m.width-3)))
+		sb.WriteString("\n")
+	}
+
+	// Fill remaining space (minus 1 for notification line)
+	for i := endRow - m.scrollOffset; i < m.pageSize-1; i++ {
+		sb.WriteString(normalRowStyle.Render(strings.Repeat(" ", m.width)))
+		sb.WriteString("\n")
+	}
+
+	// Info line - show inline search bar when active, search filter when searching, otherwise blank
+	var infoContent string
+	isLoading := m.loading || m.inlineSearchLoading || m.searchLoadingMore
+	if m.inlineSearchActive {
+		// At aggregate level, only Fast search is available (no mode tag needed)
+		infoContent = "/" + m.searchInput.View()
+	} else if m.searchQuery != "" {
+		infoContent = fmt.Sprintf(" Search: %q", m.searchQuery)
+	}
+	sb.WriteString(m.renderInfoLine(infoContent, isLoading))
+
+	// Overlay modal if active
+	if m.modal != ModalNone {
+		return m.overlayModal(sb.String())
+	}
+
+	return sb.String()
+}
+
+// messageListView renders the message list.
+func (m Model) messageListView() string {
+	if m.err != nil {
+		return m.fillScreen(errorStyle.Render(padRight(fmt.Sprintf("Error: %v", m.err), m.width)), 1)
+	}
+
+	if len(m.messages) == 0 && !m.loading {
+		return m.fillScreen(normalRowStyle.Render(padRight("No messages", m.width)), 1)
+	}
+
+	var sb strings.Builder
+
+	// Calculate column widths (reserve 3 for selection indicator)
+	dateWidth := 16
+	fromWidth := 25
+	sizeWidth := 8
+	subjectWidth := m.width - dateWidth - fromWidth - sizeWidth - 9
+	if subjectWidth < 20 {
+		subjectWidth = 20
+	}
+
+	// Header row with sort indicators
+	msgSortIndicator := func(field query.MessageSortField) string {
+		if m.msgSortField == field {
+			if m.msgSortDirection == query.SortDesc {
+				return "↓"
+			}
+			return "↑"
+		}
+		return ""
+	}
+
+	dateLabel := "Date"
+	if si := msgSortIndicator(query.MessageSortByDate); si != "" {
+		dateLabel += si
+	}
+
+	sizeLabel := "Size"
+	if si := msgSortIndicator(query.MessageSortBySize); si != "" {
+		sizeLabel += si
+	}
+
+	subjectLabel := "Subject"
+	if si := msgSortIndicator(query.MessageSortBySubject); si != "" {
+		subjectLabel += si
+	}
+
+	headerRow := fmt.Sprintf("   %-*s  %-*s  %-*s  %*s",
+		dateWidth, dateLabel,
+		fromWidth, "From",
+		subjectWidth, subjectLabel,
+		sizeWidth, sizeLabel,
+	)
+	sb.WriteString(tableHeaderStyle.Render(padRight(headerRow, m.width)))
+	sb.WriteString("\n")
+	sb.WriteString(separatorStyle.Render(strings.Repeat("─", m.width)))
+	sb.WriteString("\n")
+
+	// Data rows - show at most pageSize-1 to leave room for info line
+	endRow := m.scrollOffset + m.pageSize - 1
+	if endRow > len(m.messages) {
+		endRow = len(m.messages)
+	}
+
+	for i := m.scrollOffset; i < endRow; i++ {
+		msg := m.messages[i]
+		isCursor := i == m.cursor
+		isChecked := m.selection.MessageIDs[msg.ID]
+
+		// Selection indicator with cursor pointer
+		var selIndicator string
+		if isCursor {
+			if isChecked {
+				selIndicator = selectedIndicatorStyle.Render("▶✓ ")
+			} else {
+				selIndicator = cursorRowStyle.Render("▶  ")
+			}
+		} else if isChecked {
+			selIndicator = selectedIndicatorStyle.Render(" ✓ ")
+		} else {
+			selIndicator = "   "
+		}
+
+		// Format date
+		date := msg.SentAt.Format("2006-01-02 15:04")
+
+		// Format from (rune-aware for international names)
+		from := msg.FromEmail
+		if msg.FromName != "" {
+			from = msg.FromName
+		}
+		from = truncateRunes(from, fromWidth)
+
+		// Format subject with indicators (rune-aware)
+		subject := msg.Subject
+		if msg.DeletedAt != nil {
+			subject = "🗑 " + subject // Deleted from server indicator
+		}
+		if msg.HasAttachments {
+			subject = "📎 " + subject
+		}
+		subject = truncateRunes(subject, subjectWidth)
+
+		// Format size
+		size := formatBytes(msg.SizeEstimate)
+
+		line := fmt.Sprintf("%-*s  %-*s  %-*s  %*s",
+			dateWidth, date,
+			fromWidth, from,
+			subjectWidth, subject,
+			sizeWidth, size,
+		)
+
+		var style lipgloss.Style
+		if isCursor {
+			style = cursorRowStyle
+		} else if isChecked {
+			style = selectedRowStyle
+		} else if i%2 == 0 {
+			style = normalRowStyle
+		} else {
+			style = altRowStyle
+		}
+
+		sb.WriteString(selIndicator)
+		sb.WriteString(style.Render(padRight(line, m.width-3)))
+		sb.WriteString("\n")
+	}
+
+	// Fill remaining space (minus 1 for info line)
+	for i := endRow - m.scrollOffset; i < m.pageSize-1; i++ {
+		sb.WriteString(normalRowStyle.Render(strings.Repeat(" ", m.width)))
+		sb.WriteString("\n")
+	}
+
+	// Info line - show inline search bar when active, search info when searching, otherwise blank
+	var infoContent string
+	isLoading := m.loading || m.inlineSearchLoading || m.searchLoadingMore
+	if m.inlineSearchActive {
+		modeTag := "[Fast]"
+		if m.searchMode == SearchModeDeep {
+			modeTag = "[Deep]"
+		}
+		infoContent = modeTag + "/" + m.searchInput.View()
+	} else if m.searchQuery != "" {
+		infoContent = fmt.Sprintf(" Search: %q", m.searchQuery)
+		if m.searchTotalCount > 0 {
+			infoContent += fmt.Sprintf(" (%d results)", m.searchTotalCount)
+		} else if m.searchTotalCount == -1 {
+			infoContent += fmt.Sprintf(" (%d+ results, PgDn for more)", len(m.messages))
+		}
+		if m.searchMode == SearchModeDeep {
+			infoContent += " [Deep]"
+		}
+	}
+	sb.WriteString(m.renderInfoLine(infoContent, isLoading))
+
+	// Overlay modal if active
+	if m.modal != ModalNone {
+		return m.overlayModal(sb.String())
+	}
+
+	return sb.String()
+}
+
+// buildDetailLines constructs the lines for message detail view.
+func (m Model) buildDetailLines() []string {
+	if m.messageDetail == nil {
+		return nil
+	}
+
+	msg := m.messageDetail
+	var lines []string
+
+	// Subject
+	lines = append(lines, fmt.Sprintf("Subject: %s", msg.Subject))
+	lines = append(lines, "")
+
+	// Date
+	lines = append(lines, fmt.Sprintf("Date: %s", msg.SentAt.Format("Mon, 02 Jan 2006 15:04:05 MST")))
+
+	// From
+	if len(msg.From) > 0 {
+		from := formatAddresses(msg.From)
+		lines = append(lines, fmt.Sprintf("From: %s", from))
+	}
+
+	// To
+	if len(msg.To) > 0 {
+		to := formatAddresses(msg.To)
+		lines = append(lines, fmt.Sprintf("To: %s", to))
+	}
+
+	// Cc
+	if len(msg.Cc) > 0 {
+		cc := formatAddresses(msg.Cc)
+		lines = append(lines, fmt.Sprintf("Cc: %s", cc))
+	}
+
+	// Labels
+	if len(msg.Labels) > 0 {
+		lines = append(lines, fmt.Sprintf("Labels: %s", strings.Join(msg.Labels, ", ")))
+	}
+
+	// Attachments
+	if len(msg.Attachments) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, fmt.Sprintf("Attachments (%d):", len(msg.Attachments)))
+		for _, att := range msg.Attachments {
+			lines = append(lines, fmt.Sprintf("  📎 %s (%s)", att.Filename, formatBytes(att.Size)))
+		}
+	}
+
+	// Separator
+	lines = append(lines, "")
+	sepWidth := min(m.width-2, 80)
+	if sepWidth < 1 {
+		sepWidth = 40 // Reasonable default
+	}
+	lines = append(lines, strings.Repeat("─", sepWidth))
+	lines = append(lines, "")
+
+	// Body - wrap lines to fit width
+	body := msg.BodyText
+	if body == "" {
+		body = "(No text content)"
+	}
+	// Strip carriage returns (CRLF -> LF) to prevent display issues
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", "")
+	bodyLines := wrapText(body, m.width-2)
+	lines = append(lines, bodyLines...)
+
+	return lines
+}
+
+// fillScreen fills the remaining screen space with blank lines.
+// Used for loading/error/empty states in table views.
+func (m Model) fillScreen(content string, usedLines int) string {
+	// Guard against zero/negative width (can happen before first resize)
+	if m.width <= 0 {
+		return content + "\n"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(content)
+	sb.WriteString("\n")
+	// Fill remaining space (minus 1 for notification line)
+	for i := usedLines; i < m.pageSize-1; i++ {
+		sb.WriteString(normalRowStyle.Render(strings.Repeat(" ", m.width)))
+		sb.WriteString("\n")
+	}
+	// Notification line (blank for now)
+	sb.WriteString(normalRowStyle.Render(strings.Repeat(" ", m.width)))
+	return sb.String()
+}
+
+// fillScreenDetail fills remaining space for detail view (has 2 extra lines).
+func (m Model) fillScreenDetail(content string, usedLines int) string {
+	if m.width <= 0 {
+		return content + "\n"
+	}
+
+	detailPageSize := m.detailPageSize()
+	var sb strings.Builder
+	sb.WriteString(content)
+	sb.WriteString("\n")
+	for i := usedLines; i < detailPageSize-1; i++ {
+		sb.WriteString(normalRowStyle.Render(strings.Repeat(" ", m.width)))
+		sb.WriteString("\n")
+	}
+	sb.WriteString(normalRowStyle.Render(strings.Repeat(" ", m.width)))
+	return sb.String()
+}
+
+// messageDetailView renders the full message.
+func (m Model) messageDetailView() string {
+	if m.err != nil {
+		return m.fillScreenDetail(errorStyle.Render(padRight(fmt.Sprintf("Error loading message: %v", m.err), m.width)), 1)
+	}
+
+	if m.messageDetail == nil {
+		if m.loading {
+			return m.fillScreenDetail(loadingStyle.Render(padRight(m.spinnerIndicator()+" Loading message...", m.width)), 1)
+		}
+		return m.fillScreenDetail(errorStyle.Render(padRight("Message not found (nil detail)", m.width)), 1)
+	}
+
+	lines := m.buildDetailLines()
+
+	// Apply scrolling with bounds check
+	// Detail view has 2 extra lines vs table views (no table header or separator)
+	detailPageSize := m.detailPageSize()
+	startLine := m.detailScroll
+	if startLine >= len(lines) {
+		startLine = len(lines) - 1
+	}
+	if startLine < 0 {
+		startLine = 0
+	}
+
+	endLine := startLine + detailPageSize
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+
+	visibleLines := lines[startLine:endLine]
+
+	var sb strings.Builder
+	for _, line := range visibleLines {
+		sb.WriteString(normalRowStyle.Render(padRight(line, m.width)))
+		sb.WriteString("\n")
+	}
+
+	// Fill remaining space (minus 1 for notification line)
+	for i := len(visibleLines); i < detailPageSize-1; i++ {
+		sb.WriteString(normalRowStyle.Render(strings.Repeat(" ", m.width)))
+		sb.WriteString("\n")
+	}
+
+	// Notification line - show flash, loading indicator, or blank
+	sb.WriteString(m.renderNotificationLine())
+
+	// Overlay modal if active
+	if m.modal != ModalNone {
+		return m.overlayModal(sb.String())
+	}
+
+	return sb.String()
+}
+
+// threadView renders the thread/conversation view.
+func (m Model) threadView() string {
+	if m.err != nil {
+		return m.fillScreen(errorStyle.Render(padRight(fmt.Sprintf("Error: %v", m.err), m.width)), 1)
+	}
+
+	if m.loading && len(m.threadMessages) == 0 {
+		return m.fillScreen(loadingStyle.Render(padRight(m.spinnerIndicator()+" Loading thread...", m.width)), 1)
+	}
+
+	if !m.loading && len(m.threadMessages) == 0 {
+		return m.fillScreen(normalRowStyle.Render(padRight("No messages in thread", m.width)), 1)
+	}
+
+	var sb strings.Builder
+
+	// Header row
+	headerRow := fmt.Sprintf("   %-20s %-40s %19s",
+		"Date",
+		"From / Subject",
+		"Size",
+	)
+	sb.WriteString(headerStyle.Render(padRight(headerRow, m.width)))
+	sb.WriteString("\n")
+
+	// Separator
+	sb.WriteString(normalRowStyle.Render(strings.Repeat("─", m.width)))
+	sb.WriteString("\n")
+
+	// Calculate visible rows (account for header + separator + notification line)
+	visibleRows := m.height - 5 // header, breadcrumb, table header, separator, footer
+	if visibleRows < 1 {
+		visibleRows = 1
+	}
+
+	// Determine visible range
+	endRow := m.threadScrollOffset + visibleRows
+	if endRow > len(m.threadMessages) {
+		endRow = len(m.threadMessages)
+	}
+
+	// Render visible messages
+	for i := m.threadScrollOffset; i < endRow; i++ {
+		msg := m.threadMessages[i]
+		isSelected := i == m.threadCursor
+
+		// Format date
+		dateStr := msg.SentAt.Format("2006-01-02 15:04")
+
+		// Format from/subject with deleted indicator
+		fromSubject := msg.FromEmail
+		if msg.FromName != "" {
+			fromSubject = msg.FromName
+		}
+		if msg.Subject != "" {
+			fromSubject = truncateRunes(fromSubject, 18) + ": " + msg.Subject
+		}
+		if msg.DeletedAt != nil {
+			fromSubject = "🗑 " + fromSubject // Deleted from server indicator
+		}
+		fromSubject = truncateRunes(fromSubject, 40)
+
+		// Format size
+		sizeStr := formatBytes(msg.SizeEstimate)
+
+		// Build row
+		cursor := "  "
+		if isSelected {
+			cursor = "> "
+		}
+		row := fmt.Sprintf("%s %-20s %-40s %8s",
+			cursor,
+			dateStr,
+			fromSubject,
+			sizeStr,
+		)
+
+		// Apply style
+		var style lipgloss.Style
+		if isSelected {
+			style = selectedRowStyle
+		} else if i%2 == 0 {
+			style = normalRowStyle
+		} else {
+			style = altRowStyle
+		}
+
+		sb.WriteString(style.Render(padRight(row, m.width)))
+		sb.WriteString("\n")
+	}
+
+	// Fill remaining space (minus 1 for notification line)
+	for i := endRow - m.threadScrollOffset; i < visibleRows-1; i++ {
+		sb.WriteString(normalRowStyle.Render(strings.Repeat(" ", m.width)))
+		sb.WriteString("\n")
+	}
+
+	// Notification line - show flash, loading indicator, or blank
+	sb.WriteString(m.renderNotificationLine())
+
+	// Overlay modal if active
+	if m.modal != ModalNone {
+		return m.overlayModal(sb.String())
+	}
+
+	return sb.String()
+}
+
+// footerView renders the footer with keybindings.
+func (m Model) footerView() string {
+	var keys []string
+	var posStr string
+	var selStr string
+
+	// Selection count
+	selCount := m.SelectionCount()
+	if selCount > 0 {
+		selStr = fmt.Sprintf(" [%d selected] ", selCount)
+	}
+
+	switch m.level {
+	case LevelAggregates:
+		keys = []string{
+			"↑/k",
+			"↓/j",
+			"Enter",
+			"g group",
+			"s sort",
+			"A acct",
+			"a msgs",
+			"d del",
+		}
+		keys = append(keys, "? help")
+		if len(m.rows) > 0 {
+			// Use TotalUnique from aggregate rows for true total count
+			totalUnique := m.rows[0].TotalUnique
+			if totalUnique > 0 && totalUnique > int64(len(m.rows)) {
+				// More rows exist than loaded - show "N of M"
+				posStr = fmt.Sprintf(" %d of %d ", m.cursor+1, totalUnique)
+			} else {
+				posStr = fmt.Sprintf(" %d/%d ", m.cursor+1, len(m.rows))
+			}
+		}
+
+	case LevelSubAggregate:
+		keys = []string{
+			"↑/k",
+			"↓/j",
+			"Enter",
+			"Esc",
+			"g group",
+			"s sort",
+			"A acct",
+			"a msgs",
+			"d del",
+		}
+		keys = append(keys, "? help")
+		if len(m.rows) > 0 {
+			// Use TotalUnique from aggregate rows for true total count
+			totalUnique := m.rows[0].TotalUnique
+			if totalUnique > 0 && totalUnique > int64(len(m.rows)) {
+				// More rows exist than loaded - show "N of M"
+				posStr = fmt.Sprintf(" %d of %d ", m.cursor+1, totalUnique)
+			} else {
+				posStr = fmt.Sprintf(" %d/%d ", m.cursor+1, len(m.rows))
+			}
+		}
+
+	case LevelMessageList:
+		keys = []string{
+			"↑/k",
+			"↓/j",
+			"Enter",
+			"Esc",
+			"Space",
+			"s sort",
+			"d del",
+		}
+		keys = append(keys, "/ search", "? help")
+		if len(m.messages) > 0 {
+			// Show position / total - use contextStats for actual total when drilled down,
+			// or global stats for All Messages view
+			total := int64(len(m.messages))
+			if m.contextStats != nil && m.contextStats.MessageCount > total {
+				total = m.contextStats.MessageCount
+			} else if m.allMessages && m.stats != nil && m.stats.MessageCount > total {
+				// All Messages view - use global stats for total count
+				total = m.stats.MessageCount
+			}
+			if total > int64(len(m.messages)) {
+				// More messages exist than loaded - show "N of M"
+				posStr = fmt.Sprintf(" %d of %d ", m.cursor+1, total)
+			} else {
+				posStr = fmt.Sprintf(" %d/%d ", m.cursor+1, len(m.messages))
+			}
+		}
+
+	case LevelMessageDetail:
+		keys = []string{
+			"←/→ prev/next",
+			"↑/↓ scroll",
+			"Esc back",
+			"q quit",
+		}
+		// Show message position (N/M) in the list - reuse total from parent view
+		if len(m.messages) > 0 {
+			total := int64(len(m.messages))
+			if m.contextStats != nil && m.contextStats.MessageCount > total {
+				total = m.contextStats.MessageCount
+			} else if m.allMessages && m.stats != nil && m.stats.MessageCount > total {
+				total = m.stats.MessageCount
+			}
+			posStr = fmt.Sprintf(" msg %d/%d ", m.detailMessageIndex+1, total)
+		} else {
+			posStr = ""
+		}
+
+	case LevelThreadView:
+		keys = []string{
+			"↑/↓ navigate",
+			"Enter view",
+			"Esc back",
+			"q quit",
+		}
+		if len(m.threadMessages) > 0 {
+			posStr = fmt.Sprintf(" %d/%d ", m.threadCursor+1, len(m.threadMessages))
+		}
+	}
+
+	keysStr := strings.Join(keys, " │ ")
+
+	// Use lipgloss.Width for ANSI-aware width calculation (handles Unicode arrows ↑↓ correctly)
+	gap := m.width - lipgloss.Width(keysStr) - lipgloss.Width(posStr) - lipgloss.Width(selStr) - 2
+	if gap < 0 {
+		gap = 0
+	}
+
+	return footerStyle.Render(keysStr + strings.Repeat(" ", gap) + selStr + posStr)
+}
+
+// spinnerIndicator returns the current spinner frame string.
+func (m Model) spinnerIndicator() string {
+	if m.spinnerFrame < len(spinnerFrames) {
+		return spinnerFrames[m.spinnerFrame]
+	}
+	return spinnerFrames[0]
+}
+
+// renderInfoLine renders the info/notification line with optional right-aligned loading spinner.
+// Used on the second-to-last line of table views (before footer).
+func (m Model) renderInfoLine(content string, loading bool) string {
+	// statsStyle has Padding(0, 1) which adds 2 characters, so content should be m.width-2
+	contentWidth := m.width - 2
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+
+	if content == "" && !loading {
+		return statsStyle.Render(strings.Repeat(" ", contentWidth))
+	}
+	if loading {
+		indicator := m.spinnerIndicator()
+		currentWidth := lipgloss.Width(content)
+		indicatorWidth := lipgloss.Width(indicator)
+		gap := contentWidth - currentWidth - indicatorWidth
+		if gap < 1 {
+			gap = 1
+		}
+		// Render spinner with bold style so it's visible (statsStyle is faint)
+		styledIndicator := spinnerStyle.Render(indicator)
+		content += strings.Repeat(" ", gap) + styledIndicator
+	}
+	return statsStyle.Render(padRight(content, contentWidth))
+}
+
+// renderNotificationLine renders the notification line for detail/thread views.
+// Shows flash message, right-aligned loading spinner, or blank.
+func (m Model) renderNotificationLine() string {
+	if m.flashMessage != "" {
+		if m.loading {
+			// Flash + loading spinner
+			indicator := m.spinnerIndicator()
+			flash := " " + m.flashMessage
+			flashWidth := lipgloss.Width(flash)
+			indicatorWidth := lipgloss.Width(indicator)
+			gap := m.width - flashWidth - indicatorWidth
+			if gap < 1 {
+				gap = 1
+			}
+			return flashStyle.Render(padRight(flash+strings.Repeat(" ", gap)+indicator, m.width))
+		}
+		return flashStyle.Render(padRight(" "+m.flashMessage, m.width))
+	}
+	if m.loading {
+		return m.renderInfoLine("", true)
+	}
+	return normalRowStyle.Render(strings.Repeat(" ", m.width))
+}
+
+// Helper functions
+
+func formatBytes(bytes int64) string {
+	if bytes == 0 {
+		return "-"
+	}
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func formatCount(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	if n < 1000000 {
+		return fmt.Sprintf("%.1fK", float64(n)/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(n)/1000000)
+}
+
+// padRight pads a string with spaces to fill width terminal cells.
+// Uses lipgloss.Width to correctly handle ANSI codes and full-width characters.
+func padRight(s string, width int) string {
+	sw := lipgloss.Width(s)
+	if sw >= width {
+		// Use ANSI-aware truncation
+		return ansi.Truncate(s, width, "")
+	}
+	return s + strings.Repeat(" ", width-sw)
+}
+
+// truncateRunes truncates a string to fit within maxWidth terminal cells.
+// Uses runewidth to correctly handle full-width characters (CJK, emoji, etc.)
+// that occupy 2 terminal cells but count as 1 rune.
+// Also sanitizes the string by removing newlines and other control characters
+// that could break the display layout.
+func truncateRunes(s string, maxWidth int) string {
+	// Remove newlines and carriage returns that could break layout
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\t", " ")
+
+	width := runewidth.StringWidth(s)
+	if width <= maxWidth {
+		return s
+	}
+	if maxWidth <= 3 {
+		return runewidth.Truncate(s, maxWidth, "")
+	}
+	return runewidth.Truncate(s, maxWidth, "...")
+}
+
+func formatAddresses(addrs []query.Address) string {
+	parts := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		if addr.Name != "" {
+			parts = append(parts, fmt.Sprintf("%s <%s>", addr.Name, addr.Email))
+		} else {
+			parts = append(parts, addr.Email)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// wrapText wraps text to fit within width terminal cells.
+// Uses runewidth to correctly handle full-width characters (CJK, emoji, etc.)
+func wrapText(text string, width int) []string {
+	if width <= 0 {
+		width = 80
+	}
+
+	var result []string
+	lines := strings.Split(text, "\n")
+
+	for _, line := range lines {
+		lineWidth := runewidth.StringWidth(line)
+		if lineWidth <= width {
+			result = append(result, line)
+			continue
+		}
+
+		// Wrap long lines using terminal cell width
+		runes := []rune(line)
+		for len(runes) > 0 {
+			// Find how many runes fit within width
+			currentWidth := 0
+			breakAt := 0
+			lastSpace := -1
+
+			for i, r := range runes {
+				rw := runewidth.RuneWidth(r)
+				if currentWidth+rw > width {
+					break
+				}
+				currentWidth += rw
+				breakAt = i + 1
+				if r == ' ' {
+					lastSpace = i
+				}
+			}
+
+			// Prefer breaking at a space if we found one in the latter half
+			if lastSpace > breakAt/2 && breakAt < len(runes) {
+				breakAt = lastSpace
+			}
+
+			if breakAt == 0 {
+				// Single character too wide, take it anyway
+				breakAt = 1
+			}
+
+			result = append(result, string(runes[:breakAt]))
+			runes = runes[breakAt:]
+
+			// Skip leading spaces on continuation lines
+			for len(runes) > 0 && runes[0] == ' ' {
+				runes = runes[1:]
+			}
+		}
+	}
+
+	return result
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// overlayModal renders a modal dialog over the content.
+func (m Model) overlayModal(background string) string {
+	var modalContent string
+
+	switch m.modal {
+	case ModalDeleteConfirm:
+		if m.pendingManifest != nil {
+			modalContent = modalTitleStyle.Render("Confirm Deletion") + "\n\n"
+			modalContent += fmt.Sprintf("Stage %d messages for deletion?\n\n", len(m.pendingManifest.GmailIDs))
+			modalContent += "This creates a deletion batch. Messages will NOT be\n"
+			modalContent += "deleted until you run 'msgvault delete-staged'.\n\n"
+			if m.pendingManifest.Filters.Account == "" {
+				modalContent += "! Account not set. Use --account when executing.\n\n"
+			}
+			modalContent += "[Y] Yes, stage for deletion    [N] Cancel"
+		}
+
+	case ModalDeleteResult:
+		modalContent = modalTitleStyle.Render("Result") + "\n\n"
+		modalContent += m.modalResult + "\n\n"
+		modalContent += "Press any key to continue"
+
+	case ModalQuitConfirm:
+		modalContent = modalTitleStyle.Render("Quit?") + "\n\n"
+		modalContent += "Are you sure you want to quit?\n\n"
+		modalContent += "[Y] Yes    [N] No"
+
+	case ModalAccountSelector:
+		modalContent = modalTitleStyle.Render("Select Account") + "\n\n"
+		// All Accounts option
+		indicator := "○"
+		if m.modalCursor == 0 {
+			indicator = "●"
+		}
+		modalContent += fmt.Sprintf(" %s All Accounts\n", indicator)
+		// Individual accounts
+		for i, acc := range m.accounts {
+			indicator = "○"
+			if m.modalCursor == i+1 {
+				indicator = "●"
+			}
+			modalContent += fmt.Sprintf(" %s %s\n", indicator, acc.Identifier)
+		}
+		modalContent += "\n[↑/↓] Navigate  [Enter] Select  [Esc] Cancel"
+
+	case ModalAttachmentFilter:
+		modalContent = modalTitleStyle.Render("Filter Messages") + "\n\n"
+		// All Messages option
+		indicator := "○"
+		if m.modalCursor == 0 {
+			indicator = "●"
+		}
+		modalContent += fmt.Sprintf(" %s All Messages\n", indicator)
+		// With Attachments option
+		indicator = "○"
+		if m.modalCursor == 1 {
+			indicator = "●"
+		}
+		modalContent += fmt.Sprintf(" %s With Attachments\n", indicator)
+		modalContent += "\n[↑/↓] Navigate  [Enter] Select  [Esc] Cancel"
+
+	case ModalHelp:
+		modalContent = modalTitleStyle.Render("Keyboard Shortcuts") + "\n\n"
+		modalContent += "Navigation\n"
+		modalContent += "  ↑/k, ↓/j    Move cursor up/down\n"
+		modalContent += "  ←/h, →/l    Prev/next message (in detail view)\n"
+		modalContent += "  PgUp/PgDn   Page up/down\n"
+		modalContent += "  Home/End    Go to first/last\n"
+		modalContent += "  Enter       Drill down\n"
+		modalContent += "  Esc         Go back\n\n"
+		modalContent += "Views & Sorting\n"
+		modalContent += "  g/Tab       Cycle view types (From/To/Dom/Label/Time)\n"
+		modalContent += "  s           Cycle sort field\n"
+		modalContent += "  v/r         Reverse sort order\n"
+		modalContent += "  t           Cycle time granularity (Year/Month/Day)\n\n"
+		modalContent += "Selection & Actions\n"
+		modalContent += "  Space       Toggle selection\n"
+		modalContent += "  S           Select all visible\n"
+		modalContent += "  x           Clear selection\n"
+		modalContent += "  d/D         Stage for deletion\n"
+		modalContent += "  a           View all messages\n\n"
+		modalContent += "Other\n"
+		modalContent += "  /           Search\n"
+		modalContent += "  A           Select account\n"
+		modalContent += "  f           Filter by attachments\n"
+		modalContent += "  q           Quit\n\n"
+		modalContent += "Press any key to close"
+	}
+
+	if modalContent == "" {
+		return background
+	}
+
+	// Render modal box
+	modal := modalStyle.Render(modalContent)
+
+	// Split background and modal into lines
+	bgLines := strings.Split(background, "\n")
+	modalLines := strings.Split(modal, "\n")
+
+	// Calculate vertical centering
+	modalHeight := len(modalLines)
+	startLine := (len(bgLines) - modalHeight) / 2
+	if startLine < 0 {
+		startLine = 0
+	}
+
+	// Calculate horizontal centering
+	modalWidth := lipgloss.Width(modal)
+	leftPadding := (m.width - modalWidth) / 2
+	if leftPadding < 0 {
+		leftPadding = 0
+	}
+
+	// Overlay modal onto background, preserving background where modal doesn't cover
+	for i, modalLine := range modalLines {
+		lineIdx := startLine + i
+		if lineIdx >= len(bgLines) {
+			break
+		}
+		// Get background line and its visual width
+		bgLine := bgLines[lineIdx]
+		bgWidth := lipgloss.Width(bgLine)
+
+		// Build composite line: left background + modal + right background
+		var composite strings.Builder
+
+		// Left portion of background (before modal)
+		if leftPadding > 0 {
+			leftBg := truncateToWidth(bgLine, leftPadding)
+			composite.WriteString(leftBg)
+			// Pad if background is shorter than left padding
+			if lipgloss.Width(leftBg) < leftPadding {
+				composite.WriteString(strings.Repeat(" ", leftPadding-lipgloss.Width(leftBg)))
+			}
+		}
+
+		// Modal content
+		composite.WriteString(modalLine)
+
+		// Right portion of background (after modal)
+		rightStart := leftPadding + modalWidth
+		if rightStart < bgWidth {
+			rightBg := skipToWidth(bgLine, rightStart)
+			composite.WriteString(rightBg)
+		}
+
+		bgLines[lineIdx] = composite.String()
+	}
+
+	return strings.Join(bgLines, "\n")
+}
+
+// truncateToWidth returns the prefix of s that fits within maxWidth visual columns.
+// Uses ANSI-aware truncation to preserve escape sequences.
+func truncateToWidth(s string, maxWidth int) string {
+	return ansi.Truncate(s, maxWidth, "")
+}
+
+// skipToWidth returns the suffix of s starting after skipWidth visual columns.
+// Uses ANSI-aware cutting to preserve escape sequences.
+func skipToWidth(s string, skipWidth int) string {
+	// Cut from skipWidth to a large number (beyond any reasonable line width)
+	return ansi.Cut(s, skipWidth, 10000)
+}

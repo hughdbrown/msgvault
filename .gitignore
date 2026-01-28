@@ -1,0 +1,30 @@
+# Go binaries
+/msgvault
+/mimeshootout
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+
+# Secrets and credentials
+.env
+.env.*
+client_secret*.json
+oauth_client*.json
+
+# OS files
+.DS_Store
+
+# Local development state
+.beads/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
