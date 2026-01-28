@@ -828,15 +828,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchTotalCount = msg.totalCount
 				m.cursor = 0
 				m.scrollOffset = 0
-				// Set contextStats for search results to update header metrics
+					// Set contextStats for search results to update header metrics
+				// Preserve TotalSize/AttachmentCount if already set from drill-down
+				// (drill-down sets these from the aggregate row before loading search results)
+				hasDrillDownStats := m.contextStats != nil &&
+					(m.contextStats.TotalSize > 0 || m.contextStats.AttachmentCount > 0)
 				if msg.totalCount > 0 {
-					m.contextStats = &query.TotalStats{
-						MessageCount: msg.totalCount,
+					if hasDrillDownStats {
+						// Preserve drill-down stats, only update MessageCount
+						m.contextStats.MessageCount = msg.totalCount
+					} else {
+						m.contextStats = &query.TotalStats{
+							MessageCount: msg.totalCount,
+						}
 					}
 				} else if msg.totalCount == -1 {
 					// Unknown total, use loaded count
-					m.contextStats = &query.TotalStats{
-						MessageCount: int64(len(msg.messages)),
+					if hasDrillDownStats {
+						m.contextStats.MessageCount = int64(len(msg.messages))
+					} else {
+						m.contextStats = &query.TotalStats{
+							MessageCount: int64(len(msg.messages)),
+						}
 					}
 				} else {
 					// Zero results: clear stale contextStats from previous view

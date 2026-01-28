@@ -2483,6 +2483,86 @@ func TestSearchPaginationUpdatesContextStats(t *testing.T) {
 	}
 }
 
+// TestSearchResultsPreservesDrillDownContextStats verifies that when drilling down
+// from a search-filtered aggregate, contextStats (TotalSize, AttachmentCount) set
+// from the selected row is preserved when searchResultsMsg arrives.
+// This is the fix for the bug where drilling down into a sender after search
+// caused TotalSize and AttachmentCount to disappear from the header.
+func TestSearchResultsPreservesDrillDownContextStats(t *testing.T) {
+	model := newTestModelWithRows(testAggregateRows)
+	model.level = LevelAggregates
+	model.searchQuery = "important"
+	model.cursor = 0 // alice@example.com: Count=100, TotalSize=1000, AttachmentCount=5
+
+	// Press Enter to drill down (sets contextStats from selected row)
+	newModel, _ := model.handleAggregateKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	m := newModel.(Model)
+
+	// Verify contextStats was set from selected row with full stats
+	if m.contextStats == nil {
+		t.Fatal("expected contextStats to be set after drill-down")
+	}
+	if m.contextStats.TotalSize != 1000 {
+		t.Errorf("expected TotalSize=1000 after drill-down, got %d", m.contextStats.TotalSize)
+	}
+	if m.contextStats.AttachmentCount != 5 {
+		t.Errorf("expected AttachmentCount=5 after drill-down, got %d", m.contextStats.AttachmentCount)
+	}
+
+	// Simulate searchResultsMsg arriving with total count
+	searchMsg := searchResultsMsg{
+		requestID:  m.searchRequestID,
+		messages:   []query.MessageSummary{{ID: 1}, {ID: 2}},
+		totalCount: 100,
+	}
+	newModel2, _ := m.Update(searchMsg)
+	m2 := newModel2.(Model)
+
+	// contextStats should preserve TotalSize and AttachmentCount from drill-down
+	if m2.contextStats == nil {
+		t.Fatal("expected contextStats to be preserved after searchResultsMsg")
+	}
+	if m2.contextStats.MessageCount != 100 {
+		t.Errorf("expected MessageCount=100 (from searchResultsMsg), got %d", m2.contextStats.MessageCount)
+	}
+	if m2.contextStats.TotalSize != 1000 {
+		t.Errorf("expected TotalSize=1000 to be preserved, got %d", m2.contextStats.TotalSize)
+	}
+	if m2.contextStats.AttachmentCount != 5 {
+		t.Errorf("expected AttachmentCount=5 to be preserved, got %d", m2.contextStats.AttachmentCount)
+	}
+}
+
+// TestSearchResultsWithoutDrillDownContextStats verifies that when searching
+// without a drill-down context, contextStats is created with only MessageCount.
+func TestSearchResultsWithoutDrillDownContextStats(t *testing.T) {
+	model := newTestModelAtLevel(LevelMessageList)
+	model.searchRequestID = 1
+
+	// Simulate searchResultsMsg arriving (no prior drill-down, so no TotalSize/AttachmentCount)
+	searchMsg := searchResultsMsg{
+		requestID:  1,
+		messages:   []query.MessageSummary{{ID: 1}, {ID: 2}},
+		totalCount: 50,
+	}
+	newModel, _ := model.Update(searchMsg)
+	m := newModel.(Model)
+
+	if m.contextStats == nil {
+		t.Fatal("expected contextStats to be set after search results")
+	}
+	if m.contextStats.MessageCount != 50 {
+		t.Errorf("expected MessageCount=50, got %d", m.contextStats.MessageCount)
+	}
+	// Without drill-down, TotalSize and AttachmentCount should be 0
+	if m.contextStats.TotalSize != 0 {
+		t.Errorf("expected TotalSize=0 without drill-down, got %d", m.contextStats.TotalSize)
+	}
+	if m.contextStats.AttachmentCount != 0 {
+		t.Errorf("expected AttachmentCount=0 without drill-down, got %d", m.contextStats.AttachmentCount)
+	}
+}
+
 // TestAggregateSearchFilterSetsContextStats verifies contextStats is calculated from
 // filtered aggregate rows when a search filter is active.
 func TestAggregateSearchFilterSetsContextStats(t *testing.T) {
