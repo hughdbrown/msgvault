@@ -168,6 +168,106 @@ func escapeILIKE(s string) string {
 
 // buildWhereClause builds WHERE conditions for Parquet queries.
 // Column references use msg. prefix to be explicit since aggregate queries join multiple CTEs.
+// buildAggregateSearchConditions builds SQL conditions for a search query in aggregate views.
+// Returns conditions and args that can be appended to existing conditions.
+func (e *DuckDBEngine) buildAggregateSearchConditions(searchQuery string) ([]string, []interface{}) {
+	if searchQuery == "" {
+		return nil, nil
+	}
+
+	var conditions []string
+	var args []interface{}
+
+	q := search.Parse(searchQuery)
+
+	// Text terms: search subject and sender (email/name)
+	for _, term := range q.TextTerms {
+		termPattern := "%" + escapeILIKE(term) + "%"
+		conditions = append(conditions, `(
+			msg.subject ILIKE ? ESCAPE '\' OR
+			EXISTS (
+				SELECT 1 FROM mr mr_search
+				JOIN p p_search ON p_search.id = mr_search.participant_id
+				WHERE mr_search.message_id = msg.id
+				  AND mr_search.recipient_type = 'from'
+				  AND (p_search.email_address ILIKE ? ESCAPE '\' OR p_search.display_name ILIKE ? ESCAPE '\')
+			)
+		)`)
+		args = append(args, termPattern, termPattern, termPattern)
+	}
+
+	// from: filter - match sender email
+	for _, from := range q.FromAddrs {
+		fromPattern := "%" + escapeILIKE(from) + "%"
+		conditions = append(conditions, `EXISTS (
+			SELECT 1 FROM mr mr_from
+			JOIN p p_from ON p_from.id = mr_from.participant_id
+			WHERE mr_from.message_id = msg.id
+			  AND mr_from.recipient_type = 'from'
+			  AND p_from.email_address ILIKE ? ESCAPE '\'
+		)`)
+		args = append(args, fromPattern)
+	}
+
+	// to: filter - match recipient email (to or cc, consistent with SearchFast)
+	for _, to := range q.ToAddrs {
+		toPattern := "%" + escapeILIKE(to) + "%"
+		conditions = append(conditions, `EXISTS (
+			SELECT 1 FROM mr mr_to
+			JOIN p p_to ON p_to.id = mr_to.participant_id
+			WHERE mr_to.message_id = msg.id
+			  AND mr_to.recipient_type IN ('to', 'cc')
+			  AND p_to.email_address ILIKE ? ESCAPE '\'
+		)`)
+		args = append(args, toPattern)
+	}
+
+	// subject: filter
+	for _, subj := range q.SubjectTerms {
+		subjPattern := "%" + escapeILIKE(subj) + "%"
+		conditions = append(conditions, "msg.subject ILIKE ? ESCAPE '\\'")
+		args = append(args, subjPattern)
+	}
+
+	// label: filter - exact match (consistent with SearchFast)
+	for _, label := range q.Labels {
+		conditions = append(conditions, `EXISTS (
+			SELECT 1 FROM ml ml_label
+			JOIN l l_label ON l_label.id = ml_label.label_id
+			WHERE ml_label.message_id = msg.id
+			  AND l_label.name = ?
+		)`)
+		args = append(args, label)
+	}
+
+	// has:attachment filter
+	if q.HasAttachment != nil && *q.HasAttachment {
+		conditions = append(conditions, "msg.has_attachments = 1")
+	}
+
+	// Date filters from search query
+	if q.AfterDate != nil {
+		conditions = append(conditions, "msg.sent_at >= ?")
+		args = append(args, q.AfterDate.Format("2006-01-02 15:04:05"))
+	}
+	if q.BeforeDate != nil {
+		conditions = append(conditions, "msg.sent_at < ?")
+		args = append(args, q.BeforeDate.Format("2006-01-02 15:04:05"))
+	}
+
+	// Size filters
+	if q.LargerThan != nil {
+		conditions = append(conditions, "msg.size_estimate > ?")
+		args = append(args, *q.LargerThan)
+	}
+	if q.SmallerThan != nil {
+		conditions = append(conditions, "msg.size_estimate < ?")
+		args = append(args, *q.SmallerThan)
+	}
+
+	return conditions, args
+}
+
 func (e *DuckDBEngine) buildWhereClause(opts AggregateOptions) (string, []interface{}) {
 	var conditions []string
 	var args []interface{}
@@ -192,94 +292,9 @@ func (e *DuckDBEngine) buildWhereClause(opts AggregateOptions) (string, []interf
 	}
 
 	// Text search filter for aggregates - filter to messages matching search query
-	if opts.SearchQuery != "" {
-		q := search.Parse(opts.SearchQuery)
-
-		// Text terms: search subject and sender (email/name)
-		for _, term := range q.TextTerms {
-			termPattern := "%" + escapeILIKE(term) + "%"
-			conditions = append(conditions, `(
-				msg.subject ILIKE ? ESCAPE '\' OR
-				EXISTS (
-					SELECT 1 FROM mr mr_search
-					JOIN p p_search ON p_search.id = mr_search.participant_id
-					WHERE mr_search.message_id = msg.id
-					  AND mr_search.recipient_type = 'from'
-					  AND (p_search.email_address ILIKE ? ESCAPE '\' OR p_search.display_name ILIKE ? ESCAPE '\')
-				)
-			)`)
-			args = append(args, termPattern, termPattern, termPattern)
-		}
-
-		// from: filter - match sender email
-		for _, from := range q.FromAddrs {
-			fromPattern := "%" + escapeILIKE(from) + "%"
-			conditions = append(conditions, `EXISTS (
-				SELECT 1 FROM mr mr_from
-				JOIN p p_from ON p_from.id = mr_from.participant_id
-				WHERE mr_from.message_id = msg.id
-				  AND mr_from.recipient_type = 'from'
-				  AND p_from.email_address ILIKE ? ESCAPE '\'
-			)`)
-			args = append(args, fromPattern)
-		}
-
-		// to: filter - match recipient email (to or cc, consistent with SearchFast)
-		for _, to := range q.ToAddrs {
-			toPattern := "%" + escapeILIKE(to) + "%"
-			conditions = append(conditions, `EXISTS (
-				SELECT 1 FROM mr mr_to
-				JOIN p p_to ON p_to.id = mr_to.participant_id
-				WHERE mr_to.message_id = msg.id
-				  AND mr_to.recipient_type IN ('to', 'cc')
-				  AND p_to.email_address ILIKE ? ESCAPE '\'
-			)`)
-			args = append(args, toPattern)
-		}
-
-		// subject: filter
-		for _, subj := range q.SubjectTerms {
-			subjPattern := "%" + escapeILIKE(subj) + "%"
-			conditions = append(conditions, "msg.subject ILIKE ? ESCAPE '\\'")
-			args = append(args, subjPattern)
-		}
-
-		// label: filter - exact match (consistent with SearchFast)
-		for _, label := range q.Labels {
-			conditions = append(conditions, `EXISTS (
-				SELECT 1 FROM ml ml_label
-				JOIN l l_label ON l_label.id = ml_label.label_id
-				WHERE ml_label.message_id = msg.id
-				  AND l_label.name = ?
-			)`)
-			args = append(args, label)
-		}
-
-		// has:attachment filter
-		if q.HasAttachment != nil && *q.HasAttachment {
-			conditions = append(conditions, "msg.has_attachments = 1")
-		}
-
-		// Date filters from search query
-		if q.AfterDate != nil {
-			conditions = append(conditions, "msg.sent_at >= ?")
-			args = append(args, q.AfterDate.Format("2006-01-02 15:04:05"))
-		}
-		if q.BeforeDate != nil {
-			conditions = append(conditions, "msg.sent_at < ?")
-			args = append(args, q.BeforeDate.Format("2006-01-02 15:04:05"))
-		}
-
-		// Size filters
-		if q.LargerThan != nil {
-			conditions = append(conditions, "msg.size_estimate > ?")
-			args = append(args, *q.LargerThan)
-		}
-		if q.SmallerThan != nil {
-			conditions = append(conditions, "msg.size_estimate < ?")
-			args = append(args, *q.SmallerThan)
-		}
-	}
+	searchConds, searchArgs := e.buildAggregateSearchConditions(opts.SearchQuery)
+	conditions = append(conditions, searchConds...)
+	args = append(args, searchArgs...)
 
 	if len(conditions) == 0 {
 		return "1=1", args
@@ -653,6 +668,13 @@ func (e *DuckDBEngine) SubAggregate(ctx context.Context, filter MessageFilter, g
 	if opts.WithAttachmentsOnly {
 		where += " AND msg.has_attachments = true"
 	}
+
+	// Add search query conditions (for filtered drill-down)
+	searchConds, searchArgs := e.buildAggregateSearchConditions(opts.SearchQuery)
+	for _, cond := range searchConds {
+		where += " AND " + cond
+	}
+	args = append(args, searchArgs...)
 
 	limit := opts.Limit
 	if limit == 0 {
