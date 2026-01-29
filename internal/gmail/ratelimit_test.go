@@ -7,6 +7,33 @@ import (
 	"time"
 )
 
+// newTestLimiter creates a rate limiter with standard test defaults (5 QPS).
+func newTestLimiter() *RateLimiter {
+	return NewRateLimiter(5.0)
+}
+
+// drainBucket empties the rate limiter's token bucket.
+func drainBucket(rl *RateLimiter) {
+	for rl.TryAcquire(OpMessagesBatchDelete) {
+	}
+	for rl.TryAcquire(OpLabelsList) {
+	}
+}
+
+// getRefillRate safely reads the refill rate under the mutex.
+func getRefillRate(rl *RateLimiter) float64 {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.refillRate
+}
+
+// getThrottledUntil safely reads the throttledUntil field under the mutex.
+func getThrottledUntil(rl *RateLimiter) time.Time {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.throttledUntil
+}
+
 func TestOperationCost(t *testing.T) {
 	tests := []struct {
 		op   Operation
@@ -65,17 +92,15 @@ func TestNewRateLimiter_ScaledQPS(t *testing.T) {
 }
 
 func TestRateLimiter_TryAcquire(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Should succeed for small operations when bucket is full
 	if !rl.TryAcquire(OpProfile) {
 		t.Error("TryAcquire(OpProfile) should succeed when bucket is full")
 	}
 
-	// Drain the bucket with a large operation
-	for rl.TryAcquire(OpMessagesBatchDelete) {
-		// Keep draining
-	}
+	// Drain the bucket
+	drainBucket(rl)
 
 	// Should fail for large operations immediately after draining
 	// (even with fast refill, 50 units takes 200ms to refill)
@@ -85,7 +110,7 @@ func TestRateLimiter_TryAcquire(t *testing.T) {
 }
 
 func TestRateLimiter_Acquire_Success(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Use a generous timeout - success means completing within the timeout
 	// This avoids flaky failures from CI load or GC pauses
@@ -110,11 +135,10 @@ func TestRateLimiter_Acquire_Success(t *testing.T) {
 }
 
 func TestRateLimiter_Acquire_ContextCancelled(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Drain the bucket
-	for rl.TryAcquire(OpMessagesBatchDelete) {
-	}
+	drainBucket(rl)
 
 	// Create cancelled context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -132,10 +156,7 @@ func TestRateLimiter_Acquire_ContextTimeout(t *testing.T) {
 	rl := NewRateLimiter(MinQPS)
 
 	// Drain the bucket completely
-	for rl.TryAcquire(OpMessagesBatchDelete) {
-	}
-	for rl.TryAcquire(OpMessagesGet) {
-	}
+	drainBucket(rl)
 
 	// Request a large operation that will take longer than our timeout to refill
 	timeout := 50 * time.Millisecond
@@ -162,11 +183,10 @@ func TestRateLimiter_Acquire_ContextTimeout(t *testing.T) {
 }
 
 func TestRateLimiter_Refill(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Drain tokens
-	for rl.TryAcquire(OpMessagesBatchDelete) {
-	}
+	drainBucket(rl)
 
 	initial := rl.Available()
 	if initial >= 50 {
@@ -183,7 +203,7 @@ func TestRateLimiter_Refill(t *testing.T) {
 }
 
 func TestRateLimiter_Available(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	initial := rl.Available()
 	if initial != DefaultCapacity {
@@ -201,7 +221,7 @@ func TestRateLimiter_Available(t *testing.T) {
 }
 
 func TestRateLimiter_Concurrent(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Use a timeout to prevent test from hanging if Acquire blocks
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -230,7 +250,7 @@ func TestRateLimiter_Concurrent(t *testing.T) {
 }
 
 func TestRateLimiter_CapacityLimit(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Wait a bit to let refill happen
 	time.Sleep(20 * time.Millisecond)
@@ -243,7 +263,7 @@ func TestRateLimiter_CapacityLimit(t *testing.T) {
 }
 
 func TestRateLimiter_Throttle(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Verify initial state
 	initial := rl.Available()
@@ -278,15 +298,13 @@ func TestRateLimiter_Throttle(t *testing.T) {
 }
 
 func TestRateLimiter_RecoverRate(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Throttle reduces rate to 50%
 	rl.Throttle(10 * time.Millisecond)
 
 	// Check rate was reduced
-	rl.mu.Lock()
-	reducedRate := rl.refillRate
-	rl.mu.Unlock()
+	reducedRate := getRefillRate(rl)
 	expectedReduced := DefaultRefillRate * 0.5
 	if reducedRate != expectedReduced {
 		t.Errorf("refillRate after Throttle = %v, want %v", reducedRate, expectedReduced)
@@ -295,31 +313,25 @@ func TestRateLimiter_RecoverRate(t *testing.T) {
 	// Recover the rate
 	rl.RecoverRate()
 
-	rl.mu.Lock()
-	recoveredRate := rl.refillRate
-	rl.mu.Unlock()
+	recoveredRate := getRefillRate(rl)
 	if recoveredRate != DefaultRefillRate {
 		t.Errorf("refillRate after RecoverRate = %v, want %v", recoveredRate, DefaultRefillRate)
 	}
 }
 
 func TestRateLimiter_Throttle_DoesNotShortenBackoff(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Throttle for 200ms (simulating 403 quota error)
 	rl.Throttle(200 * time.Millisecond)
 
-	rl.mu.Lock()
-	firstThrottleEnd := rl.throttledUntil
-	rl.mu.Unlock()
+	firstThrottleEnd := getThrottledUntil(rl)
 
 	// Second throttle for 50ms (simulating 429 during backoff)
 	// This should NOT shorten the existing 200ms backoff
 	rl.Throttle(50 * time.Millisecond)
 
-	rl.mu.Lock()
-	secondThrottleEnd := rl.throttledUntil
-	rl.mu.Unlock()
+	secondThrottleEnd := getThrottledUntil(rl)
 
 	if secondThrottleEnd.Before(firstThrottleEnd) {
 		t.Errorf("Throttle shortened existing backoff: first=%v, second=%v",
@@ -328,23 +340,19 @@ func TestRateLimiter_Throttle_DoesNotShortenBackoff(t *testing.T) {
 }
 
 func TestRateLimiter_Throttle_ExtendsBackoff(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Throttle for 50ms
 	rl.Throttle(50 * time.Millisecond)
 
-	rl.mu.Lock()
-	firstThrottleEnd := rl.throttledUntil
-	rl.mu.Unlock()
+	firstThrottleEnd := getThrottledUntil(rl)
 
 	// Wait 30ms, then throttle for another 50ms
 	// This should extend the backoff since 30ms + 50ms > original 50ms
 	time.Sleep(30 * time.Millisecond)
 	rl.Throttle(50 * time.Millisecond)
 
-	rl.mu.Lock()
-	secondThrottleEnd := rl.throttledUntil
-	rl.mu.Unlock()
+	secondThrottleEnd := getThrottledUntil(rl)
 
 	if !secondThrottleEnd.After(firstThrottleEnd) {
 		t.Errorf("Throttle did not extend backoff: first=%v, second=%v",
@@ -353,15 +361,13 @@ func TestRateLimiter_Throttle_ExtendsBackoff(t *testing.T) {
 }
 
 func TestRateLimiter_AutoRecoverRate(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Throttle for a short duration
 	rl.Throttle(50 * time.Millisecond)
 
 	// Verify rate is reduced
-	rl.mu.Lock()
-	reducedRate := rl.refillRate
-	rl.mu.Unlock()
+	reducedRate := getRefillRate(rl)
 	if reducedRate != DefaultRefillRate*0.5 {
 		t.Errorf("refillRate after Throttle = %v, want %v", reducedRate, DefaultRefillRate*0.5)
 	}
@@ -373,16 +379,14 @@ func TestRateLimiter_AutoRecoverRate(t *testing.T) {
 	rl.Available()
 
 	// Verify rate is restored
-	rl.mu.Lock()
-	recoveredRate := rl.refillRate
-	rl.mu.Unlock()
+	recoveredRate := getRefillRate(rl)
 	if recoveredRate != DefaultRefillRate {
 		t.Errorf("refillRate after throttle expiry = %v, want %v", recoveredRate, DefaultRefillRate)
 	}
 }
 
 func TestRateLimiter_Acquire_WaitsForThrottle(t *testing.T) {
-	rl := NewRateLimiter(5.0)
+	rl := newTestLimiter()
 
 	// Throttle for 100ms
 	throttleDuration := 100 * time.Millisecond
