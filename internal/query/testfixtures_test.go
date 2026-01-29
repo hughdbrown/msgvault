@@ -88,7 +88,7 @@ func (b *parquetBuilder) build() (string, func()) {
 	// Write each table
 	for _, tbl := range b.tables {
 		path := escapePath(filepath.Join(tmpDir, tbl.subdir, tbl.file))
-		writeTableParquet(b.t, db, tmpDir, path, tbl.columns, tbl.values, tbl.empty)
+		writeTableParquet(b.t, db, path, tbl.columns, tbl.values, tbl.empty)
 	}
 
 	cleanup := func() {
@@ -103,7 +103,7 @@ func escapePath(p string) string {
 }
 
 // writeTableParquet writes a single table's data to a Parquet file using DuckDB.
-func writeTableParquet(t *testing.T, db *sql.DB, tmpDir, path, columns, values string, empty bool) {
+func writeTableParquet(t *testing.T, db *sql.DB, path, columns, values string, empty bool) {
 	t.Helper()
 
 	var query string
@@ -123,7 +123,6 @@ func writeTableParquet(t *testing.T, db *sql.DB, tmpDir, path, columns, values s
 	}
 
 	if _, err := db.Exec(query); err != nil {
-		os.RemoveAll(tmpDir)
 		t.Fatalf("create parquet %s: %v", path, err)
 	}
 }
