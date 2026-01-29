@@ -4947,3 +4947,222 @@ func TestTopLevelDrillDownClearsSelection(t *testing.T) {
 		t.Errorf("top-level Enter should clear message selection, got %v", m.selection.MessageIDs)
 	}
 }
+
+// =============================================================================
+// Time Granularity Drill-Down Tests
+// =============================================================================
+
+func TestTopLevelTimeDrillDown_AllGranularities(t *testing.T) {
+	// Test that top-level drill-down from Time view correctly sets both
+	// TimePeriod and TimeGranularity on the drillFilter.
+	tests := []struct {
+		name        string
+		granularity query.TimeGranularity
+		key         string
+	}{
+		{"Year", query.TimeYear, "2024"},
+		{"Month", query.TimeMonth, "2024-06"},
+		{"Day", query.TimeDay, "2024-06-15"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := NewBuilder().
+				WithRows(query.AggregateRow{Key: tt.key, Count: 87, TotalSize: 500000}).
+				WithViewType(query.ViewTime).
+				Build()
+
+			model.timeGranularity = tt.granularity
+			model.cursor = 0
+
+			newModel, _ := model.handleAggregateKeys(keyEnter())
+			m := newModel.(Model)
+
+			assertLevel(t, m, levelMessageList)
+
+			if m.drillFilter.TimePeriod != tt.key {
+				t.Errorf("drillFilter.TimePeriod = %q, want %q", m.drillFilter.TimePeriod, tt.key)
+			}
+			if m.drillFilter.TimeGranularity != tt.granularity {
+				t.Errorf("drillFilter.TimeGranularity = %v, want %v", m.drillFilter.TimeGranularity, tt.granularity)
+			}
+		})
+	}
+}
+
+func TestSubAggregateTimeDrillDown_AllGranularities(t *testing.T) {
+	// Regression test: drilling down from sub-aggregate Time view must set
+	// TimeGranularity on the drillFilter to match the current view granularity,
+	// not the stale value from the original top-level drill.
+	tests := []struct {
+		name              string
+		initialGranularity query.TimeGranularity // Set when top-level drill was created
+		subGranularity     query.TimeGranularity // Changed in sub-aggregate view
+		key               string
+	}{
+		{"Month_to_Year", query.TimeMonth, query.TimeYear, "2024"},
+		{"Year_to_Month", query.TimeYear, query.TimeMonth, "2024-06"},
+		{"Year_to_Day", query.TimeYear, query.TimeDay, "2024-06-15"},
+		{"Day_to_Year", query.TimeDay, query.TimeYear, "2023"},
+		{"Day_to_Month", query.TimeDay, query.TimeMonth, "2023-12"},
+		{"Month_to_Day", query.TimeMonth, query.TimeDay, "2024-01-15"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Start with a model already in sub-aggregate Time view
+			// (simulating: top-level sender drill → sub-group by time)
+			model := NewBuilder().
+				WithRows(query.AggregateRow{Key: tt.key, Count: 87, TotalSize: 500000}).
+				WithLevel(levelSubAggregate).
+				WithViewType(query.ViewTime).
+				Build()
+
+			// drillFilter was created during top-level drill with the initial granularity
+			model.drillFilter = query.MessageFilter{
+				Sender:          "alice@example.com",
+				TimeGranularity: tt.initialGranularity,
+			}
+			model.drillViewType = query.ViewSenders
+			// User changed granularity in the sub-aggregate view
+			model.timeGranularity = tt.subGranularity
+			model.cursor = 0
+
+			newModel, _ := model.handleAggregateKeys(keyEnter())
+			m := newModel.(Model)
+
+			assertLevel(t, m, levelMessageList)
+
+			if m.drillFilter.TimePeriod != tt.key {
+				t.Errorf("drillFilter.TimePeriod = %q, want %q", m.drillFilter.TimePeriod, tt.key)
+			}
+			if m.drillFilter.TimeGranularity != tt.subGranularity {
+				t.Errorf("drillFilter.TimeGranularity = %v, want %v (should match sub-agg granularity, not initial %v)",
+					m.drillFilter.TimeGranularity, tt.subGranularity, tt.initialGranularity)
+			}
+			// Sender filter from original drill should be preserved
+			if m.drillFilter.Sender != "alice@example.com" {
+				t.Errorf("drillFilter.Sender = %q, want %q (should preserve parent drill filter)",
+					m.drillFilter.Sender, "alice@example.com")
+			}
+		})
+	}
+}
+
+func TestSubAggregateTimeDrillDown_NonTimeViewPreservesGranularity(t *testing.T) {
+	// When sub-aggregate view is NOT Time (e.g., Labels), drilling down should
+	// NOT change the drillFilter's TimeGranularity (it may have been set by
+	// a previous time drill).
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "INBOX", Count: 50, TotalSize: 100000}).
+		WithLevel(levelSubAggregate).
+		WithViewType(query.ViewLabels).
+		Build()
+
+	model.drillFilter = query.MessageFilter{
+		Sender:          "alice@example.com",
+		TimePeriod:      "2024",
+		TimeGranularity: query.TimeYear,
+	}
+	model.drillViewType = query.ViewSenders
+	model.timeGranularity = query.TimeMonth // Different from drillFilter
+	model.cursor = 0
+
+	newModel, _ := model.handleAggregateKeys(keyEnter())
+	m := newModel.(Model)
+
+	assertLevel(t, m, levelMessageList)
+
+	// TimeGranularity should be unchanged (we drilled by Label, not Time)
+	if m.drillFilter.TimeGranularity != query.TimeYear {
+		t.Errorf("drillFilter.TimeGranularity = %v, want TimeYear (non-time drill should not change it)",
+			m.drillFilter.TimeGranularity)
+	}
+	if m.drillFilter.Label != "INBOX" {
+		t.Errorf("drillFilter.Label = %q, want %q", m.drillFilter.Label, "INBOX")
+	}
+}
+
+func TestTopLevelTimeDrillDown_GranularityChangedBeforeEnter(t *testing.T) {
+	// User starts in Time view with Month, changes to Year, then presses Enter.
+	// drillFilter should use the CURRENT granularity (Year), not the initial one.
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "2024", Count: 200, TotalSize: 1000000}).
+		WithViewType(query.ViewTime).
+		Build()
+
+	// Default is TimeMonth, user toggles to TimeYear
+	model.timeGranularity = query.TimeYear
+	model.cursor = 0
+
+	newModel, _ := model.handleAggregateKeys(keyEnter())
+	m := newModel.(Model)
+
+	assertLevel(t, m, levelMessageList)
+	if m.drillFilter.TimeGranularity != query.TimeYear {
+		t.Errorf("drillFilter.TimeGranularity = %v, want TimeYear", m.drillFilter.TimeGranularity)
+	}
+	if m.drillFilter.TimePeriod != "2024" {
+		t.Errorf("drillFilter.TimePeriod = %q, want %q", m.drillFilter.TimePeriod, "2024")
+	}
+}
+
+func TestSubAggregateTimeDrillDown_FullScenario(t *testing.T) {
+	// Full user scenario: search sender → drill → sub-group by time → toggle Year → Enter
+	// This is the exact bug report scenario.
+	model := NewBuilder().
+		WithRows(
+			query.AggregateRow{Key: "alice@example.com", Count: 200, TotalSize: 1000000},
+		).
+		WithViewType(query.ViewSenders).
+		Build()
+
+	// Step 1: Drill into alice (top-level, creates drillFilter with TimeMonth default)
+	model.timeGranularity = query.TimeMonth // default
+	model.cursor = 0
+	m1, _ := model.handleAggregateKeys(keyEnter())
+	step1 := m1.(Model)
+	assertLevel(t, step1, levelMessageList)
+
+	if step1.drillFilter.TimeGranularity != query.TimeMonth {
+		t.Fatalf("after top-level drill, TimeGranularity = %v, want TimeMonth", step1.drillFilter.TimeGranularity)
+	}
+
+	// Step 2: Tab to sub-aggregate view
+	step1.rows = nil
+	step1.loading = false
+	m2, _ := step1.handleMessageListKeys(keyTab())
+	step2 := m2.(Model)
+	assertLevel(t, step2, levelSubAggregate)
+
+	// Simulate sub-agg data loaded, switch to Time view, toggle to Year
+	step2.rows = []query.AggregateRow{
+		{Key: "2024", Count: 87, TotalSize: 400000},
+		{Key: "2023", Count: 113, TotalSize: 600000},
+	}
+	step2.loading = false
+	step2.viewType = query.ViewTime
+	step2.timeGranularity = query.TimeYear // User toggled granularity
+
+	// Step 3: Enter on "2024" — this was the bug
+	step2.cursor = 0
+	m3, _ := step2.handleAggregateKeys(keyEnter())
+	step3 := m3.(Model)
+
+	assertLevel(t, step3, levelMessageList)
+
+	// KEY ASSERTION: TimeGranularity must match the sub-agg view (Year), not the
+	// stale value from the top-level drill (Month). Otherwise the query generates
+	// a month-format expression compared against "2024", returning zero rows.
+	if step3.drillFilter.TimeGranularity != query.TimeYear {
+		t.Errorf("drillFilter.TimeGranularity = %v, want TimeYear (was stale TimeMonth from top-level drill)",
+			step3.drillFilter.TimeGranularity)
+	}
+	if step3.drillFilter.TimePeriod != "2024" {
+		t.Errorf("drillFilter.TimePeriod = %q, want %q", step3.drillFilter.TimePeriod, "2024")
+	}
+	// Original sender filter should be preserved
+	if step3.drillFilter.Sender != "alice@example.com" {
+		t.Errorf("drillFilter.Sender = %q, want %q", step3.drillFilter.Sender, "alice@example.com")
+	}
+}

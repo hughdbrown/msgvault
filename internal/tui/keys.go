@@ -257,6 +257,7 @@ func (m Model) handleAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.drillFilter.MatchEmptyLabel = (key == "")
 			case query.ViewTime:
 				m.drillFilter.TimePeriod = key
+				m.drillFilter.TimeGranularity = m.timeGranularity
 			}
 
 			m.filterKey = key
