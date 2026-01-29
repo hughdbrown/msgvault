@@ -4868,3 +4868,82 @@ func TestPushBreadcrumb(t *testing.T) {
 		t.Errorf("expected 2 breadcrumbs, got %d", len(m.breadcrumbs))
 	}
 }
+
+func TestSubAggregateDrillDownPreservesSelection(t *testing.T) {
+	// Regression test: drilling down from sub-aggregate via Enter should NOT
+	// clear the aggregate selection (only top-level Enter does that).
+	model := NewBuilder().
+		WithRows(
+			query.AggregateRow{Key: "alice@example.com", Count: 100, TotalSize: 500000},
+			query.AggregateRow{Key: "bob@example.com", Count: 50, TotalSize: 250000},
+		).
+		Build()
+
+	// Step 1: Drill down from top-level to message list (Enter on alice)
+	model.cursor = 0
+	newModel, _ := model.handleAggregateKeys(keyEnter())
+	m1 := newModel.(Model)
+	if m1.level != levelMessageList {
+		t.Fatalf("expected levelMessageList, got %v", m1.level)
+	}
+
+	// Step 2: Go to sub-aggregate view (Tab)
+	m1.rows = []query.AggregateRow{
+		{Key: "domain1.com", Count: 60, TotalSize: 300000},
+		{Key: "domain2.com", Count: 40, TotalSize: 200000},
+	}
+	m1.loading = false
+	newModel2, _ := m1.handleMessageListKeys(keyTab())
+	m2 := newModel2.(Model)
+	if m2.level != levelSubAggregate {
+		t.Fatalf("expected levelSubAggregate, got %v", m2.level)
+	}
+
+	// Step 3: Select an aggregate in sub-aggregate view, then drill down with Enter
+	m2.rows = []query.AggregateRow{
+		{Key: "domain1.com", Count: 60, TotalSize: 300000},
+		{Key: "domain2.com", Count: 40, TotalSize: 200000},
+	}
+	m2.loading = false
+	m2.selection.AggregateKeys["domain2.com"] = true
+	m2.cursor = 0
+
+	newModel3, _ := m2.handleAggregateKeys(keyEnter())
+	m3 := newModel3.(Model)
+	if m3.level != levelMessageList {
+		t.Fatalf("expected levelMessageList after sub-agg Enter, got %v", m3.level)
+	}
+
+	// The selection should NOT have been cleared by the sub-aggregate Enter
+	if len(m3.selection.AggregateKeys) == 0 {
+		t.Error("sub-aggregate Enter should not clear aggregate selection")
+	}
+}
+
+func TestTopLevelDrillDownClearsSelection(t *testing.T) {
+	// Top-level Enter should clear selections (contrasts with sub-aggregate behavior)
+	model := NewBuilder().
+		WithRows(
+			query.AggregateRow{Key: "alice@example.com", Count: 100, TotalSize: 500000},
+			query.AggregateRow{Key: "bob@example.com", Count: 50, TotalSize: 250000},
+		).
+		Build()
+
+	// Select bob, then drill into alice via Enter
+	model.selection.AggregateKeys["bob@example.com"] = true
+	model.cursor = 0
+
+	newModel, _ := model.handleAggregateKeys(keyEnter())
+	m := newModel.(Model)
+	if m.level != levelMessageList {
+		t.Fatalf("expected levelMessageList, got %v", m.level)
+	}
+
+	// Selection should be cleared
+	if len(m.selection.AggregateKeys) != 0 {
+		t.Errorf("top-level Enter should clear aggregate selection, got %v", m.selection.AggregateKeys)
+	}
+	if len(m.selection.MessageIDs) != 0 {
+		t.Errorf("top-level Enter should clear message selection, got %v", m.selection.MessageIDs)
+	}
+}

@@ -4,7 +4,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -989,23 +988,10 @@ func (m Model) confirmDeletion() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Initialize deletion manager if needed
-	if m.actions.deletionMgr == nil {
-		deletionsDir := filepath.Join(m.actions.dataDir, "deletions")
-		mgr, err := deletion.NewManager(deletionsDir)
-		if err != nil {
-			m.modal = modalDeleteResult
-			m.modalResult = fmt.Sprintf("Error: %v", err)
-			m.pendingManifest = nil
-			return m, nil
-		}
-		m.actions.deletionMgr = mgr
-	}
-
-	// Save manifest
-	if err := m.actions.deletionMgr.SaveManifest(m.pendingManifest); err != nil {
+	// Save manifest via ActionController
+	if err := m.actions.SaveManifest(m.pendingManifest); err != nil {
 		m.modal = modalDeleteResult
-		m.modalResult = fmt.Sprintf("Error saving manifest: %v", err)
+		m.modalResult = fmt.Sprintf("Error: %v", err)
 		m.pendingManifest = nil
 		return m, nil
 	}

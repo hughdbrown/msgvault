@@ -267,8 +267,11 @@ func (m Model) handleAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.messages = nil // Clear stale messages from previous drill-down
 			m.loading = true
 			m.err = nil
-			m.selection.AggregateKeys = make(map[string]bool)
-			m.selection.MessageIDs = make(map[int64]bool)
+			// Only clear selection on top-level drill-down (sub-agg didn't clear before)
+			if !isSub {
+				m.selection.AggregateKeys = make(map[string]bool)
+				m.selection.MessageIDs = make(map[int64]bool)
+			}
 
 			// If search query is active, use search with drill filter applied
 			if m.searchQuery != "" {

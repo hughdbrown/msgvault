@@ -35,6 +35,19 @@ func NewActionController(engine query.Engine, dataDir string) *ActionController 
 	}
 }
 
+// SaveManifest initializes the deletion manager if needed and saves the manifest.
+func (c *ActionController) SaveManifest(manifest *deletion.Manifest) error {
+	if c.deletionMgr == nil {
+		deletionsDir := filepath.Join(c.dataDir, "deletions")
+		mgr, err := deletion.NewManager(deletionsDir)
+		if err != nil {
+			return err
+		}
+		c.deletionMgr = mgr
+	}
+	return c.deletionMgr.SaveManifest(manifest)
+}
+
 // StageForDeletion prepares messages for deletion based on selection.
 func (c *ActionController) StageForDeletion(aggregateSelection map[string]bool, messageSelection map[int64]bool, aggregateViewType query.ViewType, accountFilter *int64, accounts []query.AccountInfo, currentViewType query.ViewType, currentFilterKey string, timeGranularity query.TimeGranularity, messages []query.MessageSummary) (*deletion.Manifest, error) {
 	// Collect Gmail IDs to delete
