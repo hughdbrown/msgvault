@@ -16,7 +16,7 @@ func newTestLimiter() *RateLimiter {
 func drainBucket(rl *RateLimiter) {
 	for rl.TryAcquire(OpMessagesBatchDelete) {
 	}
-	for rl.TryAcquire(OpLabelsList) {
+	for rl.TryAcquire(OpMessagesGet) {
 	}
 }
 
