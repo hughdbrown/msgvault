@@ -1,11 +1,64 @@
 package mime
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jhillyerd/enmime"
 )
+
+// emailOptions configures a raw RFC 2822 email message for testing.
+type emailOptions struct {
+	From        string
+	To          string
+	Subject     string
+	ContentType string
+	Body        string
+	Headers     map[string]string
+}
+
+// makeRawEmail constructs an RFC 2822 compliant raw message with correct \r\n line endings.
+func makeRawEmail(opts emailOptions) []byte {
+	var b strings.Builder
+
+	if opts.From == "" {
+		opts.From = "sender@example.com"
+	}
+	if opts.To == "" {
+		opts.To = "recipient@example.com"
+	}
+	if opts.Subject == "" {
+		opts.Subject = "Test"
+	}
+
+	b.WriteString("From: " + opts.From + "\r\n")
+	b.WriteString("To: " + opts.To + "\r\n")
+	b.WriteString("Subject: " + opts.Subject + "\r\n")
+
+	if opts.ContentType != "" {
+		b.WriteString("Content-Type: " + opts.ContentType + "\r\n")
+	}
+
+	for k, v := range opts.Headers {
+		b.WriteString(k + ": " + v + "\r\n")
+	}
+
+	b.WriteString("\r\n")
+	b.WriteString(opts.Body)
+
+	return []byte(b.String())
+}
+
+// mustParse calls Parse and fails the test on error.
+func mustParse(t *testing.T, raw []byte) *Message {
+	t.Helper()
+	msg, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	return msg
+}
 
 func TestExtractDomain(t *testing.T) {
 	tests := []struct {
@@ -242,12 +295,14 @@ func TestMessage_GetFirstFrom(t *testing.T) {
 // TestParse_MinimalMessage tests our Parse wrapper with a minimal valid message.
 // This verifies our wrapper works, not enmime's parsing logic.
 func TestParse_MinimalMessage(t *testing.T) {
-	raw := []byte("From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Test\r\nDate: Mon, 02 Jan 2006 15:04:05 -0700\r\n\r\nBody text")
+	raw := makeRawEmail(emailOptions{
+		Body: "Body text",
+		Headers: map[string]string{
+			"Date": "Mon, 02 Jan 2006 15:04:05 -0700",
+		},
+	})
 
-	msg, err := Parse(raw)
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
+	msg := mustParse(t, raw)
 
 	if len(msg.From) != 1 || msg.From[0].Email != "sender@example.com" {
 		t.Errorf("From = %v, want sender@example.com", msg.From)
@@ -275,12 +330,12 @@ func TestParse_MinimalMessage(t *testing.T) {
 // Enmime should not fail on invalid charset - it attempts conversion and collects errors.
 func TestParse_InvalidCharset(t *testing.T) {
 	// Message with non-existent charset - enmime should handle this gracefully
-	raw := []byte("From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Test\r\nContent-Type: text/plain; charset=invalid-charset-xyz\r\n\r\nBody text")
+	raw := makeRawEmail(emailOptions{
+		ContentType: "text/plain; charset=invalid-charset-xyz",
+		Body:        "Body text",
+	})
 
-	msg, err := Parse(raw)
-	if err != nil {
-		t.Fatalf("Parse() should not fail on invalid charset, got error = %v", err)
-	}
+	msg := mustParse(t, raw)
 
 	// Should still be able to access subject and addresses
 	if msg.Subject != "Test" {
@@ -295,13 +350,11 @@ func TestParse_InvalidCharset(t *testing.T) {
 
 // TestParse_Latin1Charset verifies Latin-1 (ISO-8859-1) charset is handled.
 func TestParse_Latin1Charset(t *testing.T) {
-	// Latin-1 encoded content with special characters
+	// Latin-1 encoded content with special characters.
+	// This test uses raw bytes because the subject/body contain non-UTF-8 Latin-1 bytes.
 	raw := []byte("From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Caf\xe9\r\nContent-Type: text/plain; charset=iso-8859-1\r\n\r\nCaf\xe9 au lait")
 
-	msg, err := Parse(raw)
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
+	msg := mustParse(t, raw)
 
 	// enmime should convert Latin-1 to UTF-8
 	// é in Latin-1 is 0xe9, in UTF-8 it's 0xc3 0xa9
@@ -314,12 +367,12 @@ func TestParse_Latin1Charset(t *testing.T) {
 // Group syntax: "group-name: addr1, addr2, ...;"
 func TestParse_RFC2822GroupAddress(t *testing.T) {
 	// Message with undisclosed-recipients group (common in BCC scenarios)
-	raw := []byte("From: sender@example.com\r\nTo: undisclosed-recipients:;\r\nSubject: Test\r\n\r\nBody")
+	raw := makeRawEmail(emailOptions{
+		To:   "undisclosed-recipients:;",
+		Body: "Body",
+	})
 
-	msg, err := Parse(raw)
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
+	msg := mustParse(t, raw)
 
 	// Group with no addresses should result in empty To list
 	t.Logf("To addresses: %v", msg.To)
@@ -334,12 +387,12 @@ func TestParse_RFC2822GroupAddress(t *testing.T) {
 // TestParse_RFC2822GroupAddressWithMembers verifies group with actual addresses.
 func TestParse_RFC2822GroupAddressWithMembers(t *testing.T) {
 	// Group with member addresses
-	raw := []byte("From: sender@example.com\r\nTo: team: alice@example.com, bob@example.com;\r\nSubject: Test\r\n\r\nBody")
+	raw := makeRawEmail(emailOptions{
+		To:   "team: alice@example.com, bob@example.com;",
+		Body: "Body",
+	})
 
-	msg, err := Parse(raw)
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
+	msg := mustParse(t, raw)
 
 	t.Logf("To addresses: %v", msg.To)
 	t.Logf("Parsing errors: %v", msg.Errors)
