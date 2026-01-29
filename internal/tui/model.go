@@ -922,6 +922,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKeyPress processes keyboard input.
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle inline search first (takes priority over modal and view)
+	if m.inlineSearchActive {
+		return m.handleInlineSearchKeys(msg)
+	}
+
+	// Handle modal (takes priority over view)
+	if m.modal != modalNone {
+		return m.handleModalKeys(msg)
+	}
+
 	// Handle based on current view level
 	switch m.level {
 	case levelAggregates:
@@ -1051,16 +1061,6 @@ func (m Model) handleInlineSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleAggregateKeys handles keys in the aggregate view.
 func (m Model) handleAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Handle inline search first (takes priority over modal)
-	if m.inlineSearchActive {
-		return m.handleInlineSearchKeys(msg)
-	}
-
-	// Handle modal
-	if m.modal != modalNone {
-		return m.handleModalKeys(msg)
-	}
-
 	// Handle list navigation
 	if m.navigateList(msg.String(), len(m.rows)) {
 		return m, nil
@@ -1286,16 +1286,6 @@ func (m Model) nextSubGroupView(current query.ViewType) query.ViewType {
 
 // handleSubAggregateKeys handles keys in the sub-aggregate view.
 func (m Model) handleSubAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Handle inline search first (takes priority over modal)
-	if m.inlineSearchActive {
-		return m.handleInlineSearchKeys(msg)
-	}
-
-	// Handle modal
-	if m.modal != modalNone {
-		return m.handleModalKeys(msg)
-	}
-
 	// Handle list navigation
 	if m.navigateList(msg.String(), len(m.rows)) {
 		return m, nil
@@ -1513,16 +1503,6 @@ func (m Model) handleSubAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleMessageListKeys handles keys in the message list view.
 func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Handle inline search first (takes priority over modal)
-	if m.inlineSearchActive {
-		return m.handleInlineSearchKeys(msg)
-	}
-
-	// Handle modal
-	if m.modal != modalNone {
-		return m.handleModalKeys(msg)
-	}
-
 	// Handle list navigation
 	handled := m.navigateList(msg.String(), len(m.messages))
 
@@ -1786,11 +1766,6 @@ func (m *Model) maybeLoadMoreSearchResults() tea.Cmd {
 
 // handleMessageDetailKeys handles keys in the message detail view.
 func (m Model) handleMessageDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Handle quit confirmation modal
-	if m.modal == modalQuitConfirm {
-		return m.handleModalKeys(msg)
-	}
-
 	switch msg.String() {
 	// Quit - show confirmation modal (Ctrl+C exits immediately)
 	case "q":
@@ -1903,11 +1878,6 @@ func (m Model) handleMessageDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleThreadViewKeys handles keys in the thread view.
 func (m Model) handleThreadViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Handle quit confirmation modal
-	if m.modal == modalQuitConfirm {
-		return m.handleModalKeys(msg)
-	}
-
 	switch msg.String() {
 	// Quit
 	case "q":
