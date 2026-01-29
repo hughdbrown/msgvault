@@ -1061,6 +1061,11 @@ func (m Model) handleAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleModalKeys(msg)
 	}
 
+	// Handle list navigation
+	if m.navigateList(msg.String(), len(m.rows)) {
+		return m, nil
+	}
+
 	switch msg.String() {
 	// Quit - show confirmation modal (Ctrl+C exits immediately)
 	case "q":
@@ -1082,69 +1087,31 @@ func (m Model) handleAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Account selector
 	case "A":
-		m.modal = modalAccountSelector
-		// Set cursor to current selection, default to 0 if not found
-		m.modalCursor = 0 // Default to "All Accounts"
-		if m.accountFilter != nil {
-			for i, acc := range m.accounts {
-				if acc.ID == *m.accountFilter {
-					m.modalCursor = i + 1 // +1 because 0 is "All Accounts"
-					break
-				}
-			}
-		}
-		// Clamp to valid range in case accounts list changed
-		if m.modalCursor > len(m.accounts) {
-			m.modalCursor = 0
-		}
+		m.openAccountSelector()
 		return m, nil
 
 	// Attachment filter
 	case "f":
-		m.modal = modalAttachmentFilter
-		if m.attachmentFilter {
-			m.modalCursor = 1 // "With Attachments"
-		} else {
-			m.modalCursor = 0 // "All Messages"
-		}
+		m.openAttachmentFilter()
 		return m, nil
 
-	// Search - activate inline search bar (Fast only at aggregate level)
+	// Search - activate inline search bar
 	case "/":
-		m.inlineSearchActive = true
-		m.searchMode = SearchModeFast
-		m.searchInput.Placeholder = "search"
-		m.searchInput.SetValue("") // Clear previous search
-		m.searchInput.Focus()
-		return m, textinput.Blink
+		return m, m.activateInlineSearch("search")
 
 	// Selection
 	case " ": // Space to toggle selection
-		if len(m.rows) > 0 && m.cursor < len(m.rows) {
-			key := m.rows[m.cursor].Key
-			if m.selection.AggregateKeys[key] {
-				delete(m.selection.AggregateKeys, key)
-			} else {
-				m.selection.AggregateKeys[key] = true
-			}
-		}
+		m.toggleAggregateSelection()
 
 	case "S": // Select all visible
-		endRow := m.scrollOffset + m.pageSize
-		if endRow > len(m.rows) {
-			endRow = len(m.rows)
-		}
-		for i := m.scrollOffset; i < endRow; i++ {
-			m.selection.AggregateKeys[m.rows[i].Key] = true
-		}
+		m.selectVisibleAggregates()
 
 	case "x": // Clear selection
-		m.selection.AggregateKeys = make(map[string]bool)
-		m.selection.MessageIDs = make(map[int64]bool)
+		m.clearAllSelections()
 
 	case "a": // Jump to all messages view
 		m.frozenView = m.renderView() // Freeze screen until data loads
-		m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+		m.pushBreadcrumb()
 		m.allMessages = true // Show all messages, not filtered by aggregate
 		m.filterKey = ""
 		m.level = levelMessageList
@@ -1175,7 +1142,7 @@ func (m Model) handleAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.frozenView = m.renderView() // Freeze screen until data loads
 
 			// Save current state to breadcrumb
-			m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+			m.pushBreadcrumb()
 
 			// Build drill filter from selected row
 			selectedRow := m.rows[m.cursor]
@@ -1237,42 +1204,6 @@ func (m Model) handleAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadRequestID++
 			return m, m.loadMessages()
 		}
-
-	// Navigation
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-			m.ensureCursorVisible()
-		}
-	case "down", "j":
-		if m.cursor < len(m.rows)-1 {
-			m.cursor++
-			m.ensureCursorVisible()
-		}
-	case "pgup", "ctrl+u":
-		m.cursor -= m.pageSize
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		m.ensureCursorVisible()
-	case "pgdown", "ctrl+d":
-		m.cursor += m.pageSize
-		if m.cursor >= len(m.rows) {
-			m.cursor = len(m.rows) - 1
-		}
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		m.ensureCursorVisible()
-	case "home":
-		m.cursor = 0
-		m.scrollOffset = 0
-	case "end", "G":
-		m.cursor = len(m.rows) - 1
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		m.ensureCursorVisible()
 
 	// View switching - 'g' cycles through groupings (like moneyflow), Tab also works
 	case "g", "tab":
@@ -1365,6 +1296,11 @@ func (m Model) handleSubAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleModalKeys(msg)
 	}
 
+	// Handle list navigation
+	if m.navigateList(msg.String(), len(m.rows)) {
+		return m, nil
+	}
+
 	switch msg.String() {
 	// Quit - show confirmation modal (Ctrl+C exits immediately)
 	case "q":
@@ -1392,25 +1328,13 @@ func (m Model) handleSubAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Account selector
 	case "A":
-		m.modal = modalAccountSelector
-		m.modalCursor = 0
-		if m.accountFilter != nil {
-			for i, acc := range m.accounts {
-				if acc.ID == *m.accountFilter {
-					m.modalCursor = i + 1
-					break
-				}
-			}
-		}
-		if m.modalCursor > len(m.accounts) {
-			m.modalCursor = 0
-		}
+		m.openAccountSelector()
 		return m, nil
 
 	// Jump to all messages view (with drill filter applied)
 	case "a":
 		m.frozenView = m.renderView() // Freeze screen until data loads
-		m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+		m.pushBreadcrumb()
 		m.allMessages = false
 		m.level = levelMessageList
 		m.cursor = 0
@@ -1429,46 +1353,22 @@ func (m Model) handleSubAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Attachment filter
 	case "f":
-		m.modal = modalAttachmentFilter
-		if m.attachmentFilter {
-			m.modalCursor = 1
-		} else {
-			m.modalCursor = 0
-		}
+		m.openAttachmentFilter()
 		return m, nil
 
-	// Search - activate inline search bar (Fast only at aggregate level)
+	// Search - activate inline search bar
 	case "/":
-		m.inlineSearchActive = true
-		m.searchMode = SearchModeFast
-		m.searchInput.Placeholder = "search"
-		m.searchInput.SetValue("") // Clear previous search
-		m.searchInput.Focus()
-		return m, textinput.Blink
+		return m, m.activateInlineSearch("search")
 
-	// Selection (same as aggregate view)
+	// Selection
 	case " ":
-		if len(m.rows) > 0 && m.cursor < len(m.rows) {
-			key := m.rows[m.cursor].Key
-			if m.selection.AggregateKeys[key] {
-				delete(m.selection.AggregateKeys, key)
-			} else {
-				m.selection.AggregateKeys[key] = true
-			}
-		}
+		m.toggleAggregateSelection()
 
 	case "S": // Select all visible
-		endRow := m.scrollOffset + m.pageSize
-		if endRow > len(m.rows) {
-			endRow = len(m.rows)
-		}
-		for i := m.scrollOffset; i < endRow; i++ {
-			m.selection.AggregateKeys[m.rows[i].Key] = true
-		}
+		m.selectVisibleAggregates()
 
 	case "x":
-		m.selection.AggregateKeys = make(map[string]bool)
-		m.selection.MessageIDs = make(map[int64]bool)
+		m.clearAllSelections()
 
 	// Stage for deletion (selection or current row)
 	case "d", "D":
@@ -1484,7 +1384,7 @@ func (m Model) handleSubAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.frozenView = m.renderView() // Freeze screen until data loads
 
 			// Save current state (including contextStats before it's overwritten)
-			m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+			m.pushBreadcrumb()
 
 			// Set contextual stats from selected row
 			selectedRow := m.rows[m.cursor]
@@ -1537,42 +1437,6 @@ func (m Model) handleSubAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadRequestID++
 			return m, m.loadMessages()
 		}
-
-	// Navigation (same as aggregate view)
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-			m.ensureCursorVisible()
-		}
-	case "down", "j":
-		if m.cursor < len(m.rows)-1 {
-			m.cursor++
-			m.ensureCursorVisible()
-		}
-	case "pgup", "ctrl+u":
-		m.cursor -= m.pageSize
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		m.ensureCursorVisible()
-	case "pgdown", "ctrl+d":
-		m.cursor += m.pageSize
-		if m.cursor >= len(m.rows) {
-			m.cursor = len(m.rows) - 1
-		}
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		m.ensureCursorVisible()
-	case "home":
-		m.cursor = 0
-		m.scrollOffset = 0
-	case "end", "G":
-		m.cursor = len(m.rows) - 1
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		m.ensureCursorVisible()
 
 	// Sub-grouping view switching - 'g' cycles through groupings (like moneyflow), Tab also works
 	// Skips the drill view type (can't sub-group by the same dimension)
@@ -1659,6 +1523,25 @@ func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleModalKeys(msg)
 	}
 
+	// Handle list navigation
+	handled := m.navigateList(msg.String(), len(m.messages))
+
+	// Check if we need to load more deep search results after pgdown
+	key := msg.String()
+	if (key == "pgdown" || key == "ctrl+d") &&
+		m.searchQuery != "" && m.searchMode == SearchModeDeep &&
+		m.searchTotalCount == -1 && !m.searchLoadingMore && !m.loading &&
+		m.cursor >= len(m.messages)-1 && len(m.messages) > 0 {
+		m.searchLoadingMore = true
+		m.searchRequestID++
+		spinCmd := m.startSpinner()
+		return m, tea.Batch(spinCmd, m.loadSearchWithOffset(m.searchQuery, m.searchOffset, true))
+	}
+
+	if handled {
+		return m, nil
+	}
+
 	switch msg.String() {
 	// Quit - show confirmation modal (Ctrl+C exits immediately)
 	case "q":
@@ -1706,8 +1589,7 @@ func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "x": // Clear selection
-		m.selection.AggregateKeys = make(map[string]bool)
-		m.selection.MessageIDs = make(map[int64]bool)
+		m.clearAllSelections()
 
 	case "d", "D": // Stage for deletion (selection or current row)
 		if !m.HasSelection() && len(m.messages) > 0 && m.cursor < len(m.messages) {
@@ -1718,22 +1600,12 @@ func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Attachment filter
 	case "f":
-		m.modal = modalAttachmentFilter
-		if m.attachmentFilter {
-			m.modalCursor = 1 // "With Attachments"
-		} else {
-			m.modalCursor = 0 // "All Messages"
-		}
+		m.openAttachmentFilter()
 		return m, nil
 
 	// Search - activate inline search bar
 	case "/":
-		m.inlineSearchActive = true
-		m.searchMode = SearchModeFast
-		m.searchInput.Placeholder = "search (Tab: deep)"
-		m.searchInput.SetValue("") // Clear previous search
-		m.searchInput.Focus()
-		return m, textinput.Blink
+		return m, m.activateInlineSearch("search (Tab: deep)")
 
 	// Sub-grouping: switch to aggregate breakdown within current filter
 	case "tab":
@@ -1741,7 +1613,7 @@ func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.frozenView = m.renderView() // Freeze screen until data loads
 
 			// Save current state to breadcrumb (including viewType for proper restoration)
-			m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+			m.pushBreadcrumb()
 
 			// Switch to sub-aggregate view
 			m.level = levelSubAggregate
@@ -1763,7 +1635,7 @@ func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.frozenView = m.renderView() // Freeze screen until data loads
 
 			// Save current state (include all fields for proper restoration)
-			m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+			m.pushBreadcrumb()
 
 			// Store pending subject for breadcrumb while loading
 			m.pendingDetailSubject = m.messages[m.cursor].Subject
@@ -1779,49 +1651,12 @@ func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadMessageDetail(m.messages[m.cursor].ID)
 		}
 
-	// Navigation
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-			m.ensureCursorVisible()
-		}
-	case "down", "j":
-		if m.cursor < len(m.messages)-1 {
-			m.cursor++
-			m.ensureCursorVisible()
-		}
-	case "pgup", "ctrl+u":
-		m.cursor -= m.pageSize
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		m.ensureCursorVisible()
-	case "pgdown", "ctrl+d":
-		m.cursor += m.pageSize
-		if m.cursor >= len(m.messages) {
-			m.cursor = len(m.messages) - 1
-		}
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		m.ensureCursorVisible()
-
-		// Load more deep search results when reaching the bottom
-		if m.searchQuery != "" && m.searchMode == SearchModeDeep &&
-			m.searchTotalCount == -1 && !m.searchLoadingMore && !m.loading &&
-			m.cursor >= len(m.messages)-1 && len(m.messages) > 0 {
-			m.searchLoadingMore = true
-			m.searchRequestID++
-			spinCmd := m.startSpinner()
-			return m, tea.Batch(spinCmd, m.loadSearchWithOffset(m.searchQuery, m.searchOffset, true))
-		}
-
 	// Sub-grouping: 'g' switches to aggregate breakdown within current filter (like tab)
 	case "g":
 		m.frozenView = m.renderView() // Freeze screen until data loads
 		if m.hasDrillFilter() {
 			// Save current state to breadcrumb (including viewType for proper restoration)
-			m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+			m.pushBreadcrumb()
 
 			// Switch to sub-aggregate view
 			m.level = levelSubAggregate
@@ -1849,16 +1684,6 @@ func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.aggregateRequestID++
 		return m, m.loadData()
-
-	case "home":
-		m.cursor = 0
-		m.scrollOffset = 0
-	case "end", "G":
-		m.cursor = len(m.messages) - 1
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		m.ensureCursorVisible()
 
 	// Sorting - use explicit field list to avoid hidden coupling
 	case "s":
@@ -1897,7 +1722,7 @@ func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.frozenView = m.renderView() // Freeze screen until data loads
 
 				// Save current state
-				m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+				m.pushBreadcrumb()
 
 				m.threadConversationID = convID
 				m.threadMessages = nil
@@ -2044,7 +1869,7 @@ func (m Model) handleMessageDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.frozenView = m.renderView() // Freeze screen until data loads
 
 			// Save current state
-			m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+			m.pushBreadcrumb()
 
 			m.threadConversationID = m.messageDetail.ConversationID
 			m.threadMessages = nil
@@ -2129,7 +1954,7 @@ func (m Model) handleThreadViewKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.frozenView = m.renderView() // Freeze screen until data loads
 
 			// Save current thread view state
-			m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+			m.pushBreadcrumb()
 
 			// Load message detail
 			m.pendingDetailSubject = m.threadMessages[m.threadCursor].Subject
@@ -2656,6 +2481,126 @@ func (m *Model) ensureCursorVisible() {
 	if m.cursor >= m.scrollOffset+m.pageSize {
 		m.scrollOffset = m.cursor - m.pageSize + 1
 	}
+}
+
+// pushBreadcrumb saves the current view state to the navigation history.
+func (m *Model) pushBreadcrumb() {
+	m.breadcrumbs = append(m.breadcrumbs, navigationSnapshot{state: m.viewState})
+}
+
+// navigateList handles common list navigation keys (up, down, pgup, pgdown, home, end).
+// Returns true if the key was handled.
+func (m *Model) navigateList(key string, itemCount int) bool {
+	switch key {
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
+			m.ensureCursorVisible()
+		}
+		return true
+	case "down", "j":
+		if m.cursor < itemCount-1 {
+			m.cursor++
+			m.ensureCursorVisible()
+		}
+		return true
+	case "pgup", "ctrl+u":
+		m.cursor -= m.pageSize
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		m.ensureCursorVisible()
+		return true
+	case "pgdown", "ctrl+d":
+		m.cursor += m.pageSize
+		if m.cursor >= itemCount {
+			m.cursor = itemCount - 1
+		}
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		m.ensureCursorVisible()
+		return true
+	case "home":
+		m.cursor = 0
+		m.scrollOffset = 0
+		return true
+	case "end", "G":
+		m.cursor = itemCount - 1
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		m.ensureCursorVisible()
+		return true
+	}
+	return false
+}
+
+// openAccountSelector opens the account selector modal with cursor at current selection.
+func (m *Model) openAccountSelector() {
+	m.modal = modalAccountSelector
+	m.modalCursor = 0 // Default to "All Accounts"
+	if m.accountFilter != nil {
+		for i, acc := range m.accounts {
+			if acc.ID == *m.accountFilter {
+				m.modalCursor = i + 1 // +1 because 0 is "All Accounts"
+				break
+			}
+		}
+	}
+	// Clamp to valid range in case accounts list changed
+	if m.modalCursor > len(m.accounts) {
+		m.modalCursor = 0
+	}
+}
+
+// openAttachmentFilter opens the attachment filter modal with cursor at current selection.
+func (m *Model) openAttachmentFilter() {
+	m.modal = modalAttachmentFilter
+	if m.attachmentFilter {
+		m.modalCursor = 1 // "With Attachments"
+	} else {
+		m.modalCursor = 0 // "All Messages"
+	}
+}
+
+// activateInlineSearch activates the inline search bar with fast search mode.
+func (m *Model) activateInlineSearch(placeholder string) tea.Cmd {
+	m.inlineSearchActive = true
+	m.searchMode = SearchModeFast
+	m.searchInput.Placeholder = placeholder
+	m.searchInput.SetValue("") // Clear previous search
+	m.searchInput.Focus()
+	return textinput.Blink
+}
+
+// toggleAggregateSelection toggles selection for the current aggregate row.
+func (m *Model) toggleAggregateSelection() {
+	if len(m.rows) > 0 && m.cursor < len(m.rows) {
+		key := m.rows[m.cursor].Key
+		if m.selection.AggregateKeys[key] {
+			delete(m.selection.AggregateKeys, key)
+		} else {
+			m.selection.AggregateKeys[key] = true
+		}
+	}
+}
+
+// selectVisibleAggregates selects all visible aggregate rows.
+func (m *Model) selectVisibleAggregates() {
+	endRow := m.scrollOffset + m.pageSize
+	if endRow > len(m.rows) {
+		endRow = len(m.rows)
+	}
+	for i := m.scrollOffset; i < endRow; i++ {
+		m.selection.AggregateKeys[m.rows[i].Key] = true
+	}
+}
+
+// clearAllSelections clears both aggregate and message selections.
+func (m *Model) clearAllSelections() {
+	m.selection.AggregateKeys = make(map[string]bool)
+	m.selection.MessageIDs = make(map[int64]bool)
 }
 
 // View implements tea.Model.
