@@ -11,7 +11,7 @@ type viewLevel int
 
 const (
 	levelAggregates   viewLevel = iota
-	levelSubAggregate           // Sub-grouping after drill-down
+	levelDrillDown              // Sub-grouping after drill-down
 	levelMessageList
 	levelMessageDetail
 	levelThreadView // Thread/conversation view showing all messages in a thread

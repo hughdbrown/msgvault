@@ -14,16 +14,27 @@ import (
 	"github.com/wesm/msgvault/internal/search"
 )
 
-// aggregateLimit is the maximum number of aggregate rows to load for display.
+// defaultAggregateLimit is the maximum number of aggregate rows to load for display.
 // The true total count is obtained via TotalUnique (COUNT(*) OVER()), so the
 // footer can show "N of M" even when M exceeds this limit. This limit only
 // affects how many rows are available for scrolling in the UI.
-const aggregateLimit = 50000
+const defaultAggregateLimit = 50000
+
+// defaultThreadMessageLimit is the maximum number of messages to load in a thread view.
+const defaultThreadMessageLimit = 1000
 
 // Options configuration for TUI.
 type Options struct {
 	DataDir string
 	Version string
+
+	// AggregateLimit overrides the maximum number of aggregate rows to load.
+	// Zero uses the default (50,000).
+	AggregateLimit int
+
+	// ThreadMessageLimit overrides the maximum number of messages in a thread view.
+	// Zero uses the default (1,000).
+	ThreadMessageLimit int
 }
 
 // modalType represents the type of modal dialog.
@@ -71,6 +82,10 @@ type Model struct {
 
 	// Version info for title bar
 	version string
+
+	// Configurable limits
+	aggregateLimit     int
+	threadMessageLimit int
 
 	// Navigation
 	breadcrumbs []navigationSnapshot
@@ -155,10 +170,21 @@ func New(engine query.Engine, opts Options) Model {
 	ti.CharLimit = 200
 	ti.Width = 50
 
+	aggLimit := opts.AggregateLimit
+	if aggLimit == 0 {
+		aggLimit = defaultAggregateLimit
+	}
+	threadLimit := opts.ThreadMessageLimit
+	if threadLimit == 0 {
+		threadLimit = defaultThreadMessageLimit
+	}
+
 	return Model{
-		engine:           engine,
-		actions:          NewActionController(engine, opts.DataDir),
-		version:          opts.Version,
+		engine:             engine,
+		actions:            NewActionController(engine, opts.DataDir, nil),
+		version:            opts.Version,
+		aggregateLimit:     aggLimit,
+		threadMessageLimit: threadLimit,
 		viewState: viewState{
 			level:            levelAggregates,
 			viewType:         query.ViewSenders,
@@ -225,7 +251,7 @@ func (m Model) loadData() tea.Cmd {
 			SourceID:            m.accountFilter,
 			SortField:           m.sortField,
 			SortDirection:       m.sortDirection,
-			Limit:               aggregateLimit,
+			Limit:               m.aggregateLimit,
 			TimeGranularity:     m.timeGranularity,
 			WithAttachmentsOnly: m.attachmentFilter,
 			SearchQuery:         m.searchQuery,
@@ -236,7 +262,7 @@ func (m Model) loadData() tea.Cmd {
 		var err error
 
 		// Use SubAggregate for sub-grouping, regular aggregate for top-level
-		if m.level == levelSubAggregate {
+		if m.level == levelDrillDown {
 			rows, err = m.engine.SubAggregate(ctx, m.drillFilter, m.viewType, opts)
 		} else {
 			switch m.viewType {
@@ -504,9 +530,6 @@ func (m Model) drillFilterKey() string {
 }
 
 // loadThreadMessages fetches all messages in a conversation/thread.
-// threadMessageLimit is the maximum number of messages to load in a thread view.
-const threadMessageLimit = 1000
-
 func (m Model) loadThreadMessages(conversationID int64) tea.Cmd {
 	requestID := m.loadRequestID
 	return func() (msg tea.Msg) {
@@ -523,14 +546,14 @@ func (m Model) loadThreadMessages(conversationID int64) tea.Cmd {
 			ConversationID: &conversationID,
 			SortField:      query.MessageSortByDate,
 			SortDirection:  query.SortAsc,          // Chronological order for threads
-			Limit:          threadMessageLimit + 1, // Request one extra to detect truncation
+			Limit:          m.threadMessageLimit + 1, // Request one extra to detect truncation
 		}
 		messages, err := m.engine.ListMessages(context.Background(), filter)
 
 		// Check if truncated (more messages than limit)
 		truncated := false
-		if len(messages) > threadMessageLimit {
-			messages = messages[:threadMessageLimit]
+		if len(messages) > m.threadMessageLimit {
+			messages = messages[:m.threadMessageLimit]
 			truncated = true
 		}
 
@@ -862,7 +885,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Handle based on current view level
 	switch m.level {
-	case levelAggregates, levelSubAggregate:
+	case levelAggregates, levelDrillDown:
 		return m.handleAggregateKeys(msg)
 	case levelMessageList:
 		return m.handleMessageListKeys(msg)
@@ -1050,7 +1073,7 @@ func (m Model) View() string {
 // before changing state (for the frozenView pattern).
 func (m Model) renderView() string {
 	switch m.level {
-	case levelAggregates, levelSubAggregate:
+	case levelAggregates, levelDrillDown:
 		return fmt.Sprintf("%s\n%s\n%s",
 			m.headerView(),
 			m.aggregateTableView(),

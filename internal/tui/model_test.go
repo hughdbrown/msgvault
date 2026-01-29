@@ -1265,8 +1265,8 @@ func TestSubGroupingNavigation(t *testing.T) {
 	newModel, cmd = m.handleMessageListKeys(keyTab())
 	m = newModel.(Model)
 
-	if m.level != levelSubAggregate {
-		t.Errorf("expected levelSubAggregate after Tab, got %v", m.level)
+	if m.level != levelDrillDown {
+		t.Errorf("expected levelDrillDown after Tab, got %v", m.level)
 	}
 	// Default sub-group after drilling from Senders should be Recipients
 	if m.viewType != query.ViewRecipients {
@@ -1398,7 +1398,7 @@ func TestSubAggregateDrillDown(t *testing.T) {
 	model.pageSize = 10
 	model.width = 100
 	model.height = 20
-	model.level = levelSubAggregate
+	model.level = levelDrillDown
 	model.viewType = query.ViewRecipients
 	model.drillViewType = query.ViewSenders
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
@@ -1713,7 +1713,7 @@ func TestSearchFromSubAggregate(t *testing.T) {
 	model.pageSize = 10
 	model.width = 100
 	model.height = 20
-	model.level = levelSubAggregate
+	model.level = levelDrillDown
 	model.viewType = query.ViewRecipients
 	model.drillViewType = query.ViewSenders
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
@@ -1849,7 +1849,7 @@ func TestGKeyInSubAggregate(t *testing.T) {
 	model.pageSize = 10
 	model.width = 100
 	model.height = 20
-	model.level = levelSubAggregate
+	model.level = levelDrillDown
 	model.viewType = query.ViewRecipients
 	model.drillViewType = query.ViewSenders // Drilled from Senders
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
@@ -1892,8 +1892,8 @@ func TestGKeyInMessageListWithDrillFilter(t *testing.T) {
 	newModel, _ := model.handleMessageListKeys(key('g'))
 	m := newModel.(Model)
 
-	if m.level != levelSubAggregate {
-		t.Errorf("expected level=levelSubAggregate after 'g' with drill filter, got %v", m.level)
+	if m.level != levelDrillDown {
+		t.Errorf("expected level=levelDrillDown after 'g' with drill filter, got %v", m.level)
 	}
 	// ViewType should be next logical view (Recipients after Senders)
 	if m.viewType != query.ViewRecipients {
@@ -2224,8 +2224,8 @@ func TestContextStatsRestoredOnGoBackToSubAggregate(t *testing.T) {
 		{Key: "domain2.com", Count: 40, TotalSize: 200000},
 	}
 	m2.loading = false
-	if m2.level != levelSubAggregate {
-		t.Fatalf("expected levelSubAggregate after Tab, got %v", m2.level)
+	if m2.level != levelDrillDown {
+		t.Fatalf("expected levelDrillDown after Tab, got %v", m2.level)
 	}
 	// contextStats should still be the same (alice's stats)
 	if m2.contextStats != originalContextStats {
@@ -2246,8 +2246,8 @@ func TestContextStatsRestoredOnGoBackToSubAggregate(t *testing.T) {
 	// Step 4: Go back to sub-aggregate (contextStats should be restored to alice's stats)
 	newModel4, _ := m3.goBack()
 	m4 := newModel4.(Model)
-	if m4.level != levelSubAggregate {
-		t.Fatalf("expected levelSubAggregate after goBack, got %v", m4.level)
+	if m4.level != levelDrillDown {
+		t.Fatalf("expected levelDrillDown after goBack, got %v", m4.level)
 	}
 	// contextStats should be restored from breadcrumb
 	if m4.contextStats == nil {
@@ -2749,7 +2749,7 @@ func TestAggregateNoSearchFilterClearsContextStats(t *testing.T) {
 // TestSubAggregateSearchFilterSetsContextStats verifies contextStats is calculated
 // at sub-aggregate level when search filter is active.
 func TestSubAggregateSearchFilterSetsContextStats(t *testing.T) {
-	model := newTestModelAtLevel(levelSubAggregate).
+	model := newTestModelAtLevel(levelDrillDown).
 		withSearchQuery("important").
 		withAggregateRequestID(1)
 
@@ -2870,7 +2870,7 @@ func TestDrillDownWithoutSearchQueryUsesLoadMessages(t *testing.T) {
 // also uses search when a query is active.
 func TestSubAggregateDrillDownWithSearchQuery(t *testing.T) {
 	model := newTestModelWithRows(testAggregateRows)
-	model.level = levelSubAggregate
+	model.level = levelDrillDown
 	model.searchQuery = "urgent"
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
 	model.drillViewType = query.ViewSenders
@@ -2923,8 +2923,8 @@ func TestViewTypeRestoredAfterEscFromSubAggregate(t *testing.T) {
 	newModel, _ := model.Update(keyTab())
 	m := newModel.(Model)
 
-	if m.level != levelSubAggregate {
-		t.Fatalf("expected levelSubAggregate, got %v", m.level)
+	if m.level != levelDrillDown {
+		t.Fatalf("expected levelDrillDown, got %v", m.level)
 	}
 	// viewType should have changed to next sub-group view (Recipients)
 	if m.viewType != query.ViewRecipients {
@@ -3208,7 +3208,7 @@ func TestHeaderSubAggregateShowsDrillContext(t *testing.T) {
 	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
 	model.width = 100
 	model.height = 20
-	model.level = levelSubAggregate
+	model.level = levelDrillDown
 	model.viewType = query.ViewRecipients
 	model.drillViewType = query.ViewSenders
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
@@ -4428,7 +4428,7 @@ func TestSubAggregateAKeyJumpsToMessages(t *testing.T) {
 	}
 
 	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelSubAggregate
+	model.level = levelDrillDown
 	model.viewType = query.ViewLabels
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
 	model.drillViewType = query.ViewSenders
@@ -4463,8 +4463,8 @@ func TestSubAggregateAKeyJumpsToMessages(t *testing.T) {
 	}
 
 	// Breadcrumb should be for sub-aggregate level
-	if m.breadcrumbs[0].state.level != levelSubAggregate {
-		t.Errorf("expected breadcrumb level = levelSubAggregate, got %v", m.breadcrumbs[0].state.level)
+	if m.breadcrumbs[0].state.level != levelDrillDown {
+		t.Errorf("expected breadcrumb level = levelDrillDown, got %v", m.breadcrumbs[0].state.level)
 	}
 }
 
@@ -4885,8 +4885,8 @@ func TestSubAggregateDrillDownPreservesSelection(t *testing.T) {
 	m1.loading = false
 	newModel2, _ := m1.handleMessageListKeys(keyTab())
 	m2 := newModel2.(Model)
-	if m2.level != levelSubAggregate {
-		t.Fatalf("expected levelSubAggregate, got %v", m2.level)
+	if m2.level != levelDrillDown {
+		t.Fatalf("expected levelDrillDown, got %v", m2.level)
 	}
 
 	// Step 3: Select an aggregate in sub-aggregate view, then drill down with Enter
@@ -5004,7 +5004,7 @@ func TestSubAggregateTimeDrillDown_AllGranularities(t *testing.T) {
 			// (simulating: top-level sender drill → sub-group by time)
 			model := NewBuilder().
 				WithRows(query.AggregateRow{Key: tt.key, Count: 87, TotalSize: 500000}).
-				WithLevel(levelSubAggregate).
+				WithLevel(levelDrillDown).
 				WithViewType(query.ViewTime).
 				Build()
 
@@ -5045,7 +5045,7 @@ func TestSubAggregateTimeDrillDown_NonTimeViewPreservesGranularity(t *testing.T)
 	// a previous time drill).
 	model := NewBuilder().
 		WithRows(query.AggregateRow{Key: "INBOX", Count: 50, TotalSize: 100000}).
-		WithLevel(levelSubAggregate).
+		WithLevel(levelDrillDown).
 		WithViewType(query.ViewLabels).
 		Build()
 
@@ -5123,7 +5123,7 @@ func TestSubAggregateTimeDrillDown_FullScenario(t *testing.T) {
 	step1.loading = false
 	m2, _ := step1.handleMessageListKeys(keyTab())
 	step2 := m2.(Model)
-	assertLevel(t, step2, levelSubAggregate)
+	assertLevel(t, step2, levelDrillDown)
 
 	// Simulate sub-agg data loaded, switch to Time view, toggle to Year
 	step2.rows = []query.AggregateRow{

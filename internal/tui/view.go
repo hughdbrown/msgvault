@@ -277,7 +277,7 @@ func (m Model) headerView() string {
 		if m.viewType == query.ViewTime {
 			breadcrumb += " (" + m.timeGranularity.String() + ")"
 		}
-	case levelSubAggregate:
+	case levelDrillDown:
 		// Show drill context: "S: foo@example.com (by To)"
 		drillKey := m.drillFilterKey()
 		breadcrumb = fmt.Sprintf("%s: %s (by %s)", viewTypePrefix(m.drillViewType), truncateRunes(drillKey, 30), viewTypeAbbrev(m.viewType))
@@ -317,7 +317,7 @@ func (m Model) headerView() string {
 
 	// Stats - show contextual when drilled down or search filter is active
 	var statsStr string
-	if m.contextStats != nil && (m.level == levelMessageList || m.level == levelSubAggregate || m.searchQuery != "") {
+	if m.contextStats != nil && (m.level == levelMessageList || m.level == levelDrillDown || m.searchQuery != "") {
 		// Show "+" suffix when search has more results than loaded
 		msgsSuffix := ""
 		if m.searchTotalCount == -1 {
@@ -998,7 +998,7 @@ func (m Model) footerView() string {
 			}
 		}
 
-	case levelSubAggregate:
+	case levelDrillDown:
 		keys = []string{
 			"↑/k",
 			"↓/j",

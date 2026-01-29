@@ -121,7 +121,7 @@ func (m Model) handleInlineSearchKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleAggregateKeys handles keys in the aggregate and sub-aggregate views.
 func (m Model) handleAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	isSub := m.level == levelSubAggregate
+	isSub := m.level == levelDrillDown
 
 	// Handle list navigation
 	if m.navigateList(msg.String(), len(m.rows)) {
@@ -475,7 +475,7 @@ func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.pushBreadcrumb()
 
 			// Switch to sub-aggregate view
-			m.level = levelSubAggregate
+			m.level = levelDrillDown
 			m.viewType = m.nextSubGroupView(m.drillViewType)
 			m.cursor = 0
 			m.scrollOffset = 0
@@ -518,7 +518,7 @@ func (m Model) handleMessageListKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.pushBreadcrumb()
 
 			// Switch to sub-aggregate view
-			m.level = levelSubAggregate
+			m.level = levelDrillDown
 			m.viewType = m.nextSubGroupView(m.drillViewType)
 			m.cursor = 0
 			m.scrollOffset = 0

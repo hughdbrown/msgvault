@@ -20,30 +20,32 @@ type ExportResultMsg struct {
 // ActionController handles business logic for actions like deletion and export,
 // keeping domain operations out of the TUI Model.
 type ActionController struct {
-	engine      query.Engine
-	deletionMgr *deletion.Manager
-	dataDir     string
+	queries   query.Engine
+	deletions *deletion.Manager
+	dataDir   string
 }
 
 // NewActionController creates a new action controller.
-func NewActionController(engine query.Engine, dataDir string) *ActionController {
+// If deletions is nil, the manager will be lazily initialized on first use.
+func NewActionController(queries query.Engine, dataDir string, deletions *deletion.Manager) *ActionController {
 	return &ActionController{
-		engine:  engine,
-		dataDir: dataDir,
+		queries:   queries,
+		deletions: deletions,
+		dataDir:   dataDir,
 	}
 }
 
 // SaveManifest initializes the deletion manager if needed and saves the manifest.
 func (c *ActionController) SaveManifest(manifest *deletion.Manifest) error {
-	if c.deletionMgr == nil {
+	if c.deletions == nil {
 		deletionsDir := filepath.Join(c.dataDir, "deletions")
 		mgr, err := deletion.NewManager(deletionsDir)
 		if err != nil {
 			return err
 		}
-		c.deletionMgr = mgr
+		c.deletions = mgr
 	}
-	return c.deletionMgr.SaveManifest(manifest)
+	return c.deletions.SaveManifest(manifest)
 }
 
 // StageForDeletion prepares messages for deletion based on selection.
@@ -73,7 +75,7 @@ func (c *ActionController) StageForDeletion(aggregateSelection map[string]bool, 
 				filter.TimeGranularity = timeGranularity
 			}
 
-			ids, err := c.engine.GetGmailIDsByFilter(ctx, filter)
+			ids, err := c.queries.GetGmailIDsByFilter(ctx, filter)
 			if err != nil {
 				return nil, fmt.Errorf("error loading messages: %v", err)
 			}
