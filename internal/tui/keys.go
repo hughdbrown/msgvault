@@ -670,9 +670,11 @@ func (m Model) handleMessageDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Handle global keys (quit, help) - but not when detail search is active
-	if m2, cmd, handled := m.handleGlobalKeys(msg); handled {
-		return m2, cmd
+	// Handle global keys (quit, help) but not when detail search is active
+	if !m.detailSearchActive {
+		if m2, cmd, handled := m.handleGlobalKeys(msg); handled {
+			return m2, cmd
+		}
 	}
 
 	switch msg.String() {
