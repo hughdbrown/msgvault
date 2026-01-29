@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 	"github.com/wesm/msgvault/internal/query"
+	"github.com/wesm/msgvault/internal/search"
 )
 
 // Monochrome theme - works on any dark terminal
@@ -93,7 +94,102 @@ var (
 			Italic(true).
 			Foreground(lipgloss.Color("#ffcc00")). // Yellow/amber for visibility
 			Background(bgBase)
+
+	highlightStyle = lipgloss.NewStyle().
+			Reverse(true).
+			Bold(true)
 )
+
+// highlightTerms applies highlight styling to all occurrences of search terms in text.
+// Terms are extracted from a search query string using search.Parse().
+// Highlighting is case-insensitive. Returns the original text with ANSI highlight codes.
+func highlightTerms(text, searchQuery string) string {
+	if searchQuery == "" || text == "" {
+		return text
+	}
+	terms := extractSearchTerms(searchQuery)
+	if len(terms) == 0 {
+		return text
+	}
+	return applyHighlight(text, terms)
+}
+
+// extractSearchTerms extracts displayable search terms from a query string.
+func extractSearchTerms(queryStr string) []string {
+	q := search.Parse(queryStr)
+	var terms []string
+	terms = append(terms, q.TextTerms...)
+	terms = append(terms, q.FromAddrs...)
+	terms = append(terms, q.ToAddrs...)
+	terms = append(terms, q.SubjectTerms...)
+	// Deduplicate and filter empty
+	seen := make(map[string]bool, len(terms))
+	filtered := terms[:0]
+	for _, t := range terms {
+		lower := strings.ToLower(t)
+		if t != "" && !seen[lower] {
+			seen[lower] = true
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
+// applyHighlight wraps all case-insensitive occurrences of any term in text with highlightStyle.
+func applyHighlight(text string, terms []string) string {
+	if len(terms) == 0 {
+		return text
+	}
+	lower := strings.ToLower(text)
+	// Build list of highlight intervals [start, end)
+	type interval struct{ start, end int }
+	var intervals []interval
+	for _, term := range terms {
+		tl := strings.ToLower(term)
+		idx := 0
+		for {
+			pos := strings.Index(lower[idx:], tl)
+			if pos < 0 {
+				break
+			}
+			start := idx + pos
+			end := start + len(tl)
+			intervals = append(intervals, interval{start, end})
+			idx = end
+		}
+	}
+	if len(intervals) == 0 {
+		return text
+	}
+	// Sort and merge overlapping intervals
+	// Simple insertion sort since we expect few intervals
+	for i := 1; i < len(intervals); i++ {
+		for j := i; j > 0 && intervals[j].start < intervals[j-1].start; j-- {
+			intervals[j], intervals[j-1] = intervals[j-1], intervals[j]
+		}
+	}
+	merged := []interval{intervals[0]}
+	for _, iv := range intervals[1:] {
+		last := &merged[len(merged)-1]
+		if iv.start <= last.end {
+			if iv.end > last.end {
+				last.end = iv.end
+			}
+		} else {
+			merged = append(merged, iv)
+		}
+	}
+	// Build result
+	var sb strings.Builder
+	prev := 0
+	for _, iv := range merged {
+		sb.WriteString(text[prev:iv.start])
+		sb.WriteString(highlightStyle.Render(text[iv.start:iv.end]))
+		prev = iv.end
+	}
+	sb.WriteString(text[prev:])
+	return sb.String()
+}
 
 // viewTypeAbbrev returns view type name for column headers and top-level breadcrumb.
 func viewTypeAbbrev(vt query.ViewType) string {
@@ -342,8 +438,9 @@ func (m Model) aggregateTableView() string {
 			selIndicator = "   "
 		}
 
-		// Truncate key if needed (rune-aware)
+		// Truncate key if needed (rune-aware), then highlight search terms
 		key := truncateRunes(row.Key, keyWidth)
+		key = highlightTerms(key, m.searchQuery)
 
 		line := fmt.Sprintf("%-*s %10s %12s %12s",
 			keyWidth, key,
@@ -485,6 +582,7 @@ func (m Model) messageListView() string {
 			from = msg.FromName
 		}
 		from = truncateRunes(from, fromWidth)
+		from = highlightTerms(from, m.searchQuery)
 
 		// Format subject with indicators (rune-aware)
 		subject := msg.Subject
@@ -495,6 +593,7 @@ func (m Model) messageListView() string {
 			subject = "📎 " + subject
 		}
 		subject = truncateRunes(subject, subjectWidth)
+		subject = highlightTerms(subject, m.searchQuery)
 
 		// Format size
 		size := formatBytes(msg.SizeEstimate)
@@ -701,8 +800,25 @@ func (m Model) messageDetailView() string {
 
 	visibleLines := lines[startLine:endLine]
 
+	// Determine active highlight query: detail search overrides global search
+	detailHighlightQuery := m.detailSearchQuery
+	if detailHighlightQuery == "" {
+		detailHighlightQuery = m.searchQuery
+	}
+
 	var sb strings.Builder
-	for _, line := range visibleLines {
+	for lineIdx, line := range visibleLines {
+		if detailHighlightQuery != "" {
+			line = highlightTerms(line, detailHighlightQuery)
+		}
+		// Highlight current detail search match line
+		absLine := startLine + lineIdx
+		if m.detailSearchQuery != "" && len(m.detailSearchMatches) > 0 &&
+			m.detailSearchMatchIndex < len(m.detailSearchMatches) &&
+			absLine == m.detailSearchMatches[m.detailSearchMatchIndex] {
+			// Current match line gets a subtle indicator
+			line = "▶ " + line
+		}
 		sb.WriteString(normalRowStyle.Render(padRight(line, m.width)))
 		sb.WriteString("\n")
 	}
@@ -713,8 +829,21 @@ func (m Model) messageDetailView() string {
 		sb.WriteString("\n")
 	}
 
-	// Notification line - show flash, loading indicator, or blank
-	sb.WriteString(m.renderNotificationLine())
+	// Notification line - show detail search bar, flash, loading, or blank
+	if m.detailSearchActive {
+		infoContent := "/" + m.detailSearchInput.View()
+		sb.WriteString(m.renderInfoLine(infoContent, false))
+	} else if m.detailSearchQuery != "" {
+		matchInfo := fmt.Sprintf(" /%s", m.detailSearchQuery)
+		if len(m.detailSearchMatches) > 0 {
+			matchInfo += fmt.Sprintf(" [%d/%d]", m.detailSearchMatchIndex+1, len(m.detailSearchMatches))
+		} else {
+			matchInfo += " [no matches]"
+		}
+		sb.WriteString(m.renderInfoLine(matchInfo, false))
+	} else {
+		sb.WriteString(m.renderNotificationLine())
+	}
 
 	// Overlay modal if active
 	if m.modal != modalNone {
@@ -785,6 +914,7 @@ func (m Model) threadView() string {
 			fromSubject = "🗑 " + fromSubject // Deleted from server indicator
 		}
 		fromSubject = truncateRunes(fromSubject, 40)
+		fromSubject = highlightTerms(fromSubject, m.searchQuery)
 
 		// Format size
 		sizeStr := formatBytes(msg.SizeEstimate)
@@ -925,6 +1055,10 @@ func (m Model) footerView() string {
 		keys = []string{
 			"←/→ prev/next",
 			"↑/↓ scroll",
+			"/ find",
+		}
+		if m.detailSearchQuery != "" {
+			keys = append(keys, "n/N next/prev")
 		}
 		// Show export option if message has attachments
 		if m.messageDetail != nil && len(m.messageDetail.Attachments) > 0 {

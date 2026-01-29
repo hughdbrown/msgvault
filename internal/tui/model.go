@@ -2,11 +2,8 @@
 package tui
 
 import (
-	"archive/zip"
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -71,6 +68,13 @@ type viewState struct {
 	detailMessageIndex   int
 	detailFromThread     bool
 	pendingDetailSubject string
+
+	// Detail search (find-in-page)
+	detailSearchActive     bool
+	detailSearchInput      textinput.Model
+	detailSearchQuery      string
+	detailSearchMatches    []int // Line indices with matches
+	detailSearchMatchIndex int   // Current match index
 	
 	// Thread view specific
 	threadConversationID int64
@@ -1766,6 +1770,29 @@ func (m *Model) maybeLoadMoreSearchResults() tea.Cmd {
 
 // handleMessageDetailKeys handles keys in the message detail view.
 func (m Model) handleMessageDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// When detail search input is active, route keys there first
+	if m.detailSearchActive {
+		switch msg.String() {
+		case "enter":
+			m.detailSearchActive = false
+			m.detailSearchQuery = m.detailSearchInput.Value()
+			m.findDetailMatches()
+			if len(m.detailSearchMatches) > 0 {
+				m.detailSearchMatchIndex = 0
+				m.scrollToDetailMatch()
+			}
+			return m, nil
+		case "esc":
+			m.detailSearchActive = false
+			m.detailSearchInput.SetValue("")
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.detailSearchInput, cmd = m.detailSearchInput.Update(msg)
+			return m, cmd
+		}
+	}
+
 	switch msg.String() {
 	// Quit - show confirmation modal (Ctrl+C exits immediately)
 	case "q":
@@ -1775,9 +1802,47 @@ func (m Model) handleMessageDetailKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 
-	// Back to message list
+	// Back to message list or clear detail search
 	case "esc":
+		if m.detailSearchQuery != "" {
+			m.detailSearchQuery = ""
+			m.detailSearchMatches = nil
+			m.detailSearchMatchIndex = 0
+			return m, nil
+		}
 		return m.goBack()
+
+	// Detail search
+	case "/":
+		m.detailSearchActive = true
+		m.detailSearchInput = textinput.New()
+		m.detailSearchInput.Placeholder = "find in message..."
+		m.detailSearchInput.CharLimit = 200
+		m.detailSearchInput.Width = 50
+		if m.detailSearchQuery != "" {
+			m.detailSearchInput.SetValue(m.detailSearchQuery)
+		}
+		m.detailSearchInput.Focus()
+		return m, m.detailSearchInput.Cursor.BlinkCmd()
+
+	// Next match
+	case "n":
+		if m.detailSearchQuery != "" && len(m.detailSearchMatches) > 0 {
+			m.detailSearchMatchIndex = (m.detailSearchMatchIndex + 1) % len(m.detailSearchMatches)
+			m.scrollToDetailMatch()
+		}
+		return m, nil
+
+	// Previous match
+	case "N":
+		if m.detailSearchQuery != "" && len(m.detailSearchMatches) > 0 {
+			m.detailSearchMatchIndex--
+			if m.detailSearchMatchIndex < 0 {
+				m.detailSearchMatchIndex = len(m.detailSearchMatches) - 1
+			}
+			m.scrollToDetailMatch()
+		}
+		return m, nil
 
 	// Navigate to previous message in list (left = towards first)
 	case "left", "h":
@@ -2075,6 +2140,36 @@ func (m *Model) clampDetailScroll() {
 	if m.detailScroll > maxScroll {
 		m.detailScroll = maxScroll
 	}
+}
+
+// findDetailMatches finds all lines matching the detail search query.
+func (m *Model) findDetailMatches() {
+	m.detailSearchMatches = nil
+	if m.detailSearchQuery == "" || m.messageDetail == nil {
+		return
+	}
+	lines := m.buildDetailLines()
+	query := strings.ToLower(m.detailSearchQuery)
+	for i, line := range lines {
+		if strings.Contains(strings.ToLower(line), query) {
+			m.detailSearchMatches = append(m.detailSearchMatches, i)
+		}
+	}
+}
+
+// scrollToDetailMatch scrolls the detail view to show the current match.
+func (m *Model) scrollToDetailMatch() {
+	if len(m.detailSearchMatches) == 0 || m.detailSearchMatchIndex >= len(m.detailSearchMatches) {
+		return
+	}
+	targetLine := m.detailSearchMatches[m.detailSearchMatchIndex]
+	pageSize := m.detailPageSize()
+	// Center the match in the viewport
+	m.detailScroll = targetLine - pageSize/2
+	if m.detailScroll < 0 {
+		m.detailScroll = 0
+	}
+	m.clampDetailScroll()
 }
 
 // updateDetailLineCount recalculates the line count for scroll bounds.
@@ -2670,125 +2765,3 @@ func (m Model) exportAttachments() (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// doExportAttachments performs the actual export work and returns the result message.
-func doExportAttachments(zipFilename, attachmentsDir string, attachments []query.AttachmentInfo) exportResultMsg {
-	zipFile, err := os.Create(zipFilename)
-	if err != nil {
-		return exportResultMsg{err: fmt.Errorf("failed to create zip file: %w", err)}
-	}
-	// Don't defer Close - we need to handle errors and avoid double-close
-
-	zipWriter := zip.NewWriter(zipFile)
-
-	var exportedCount int
-	var totalSize int64
-	var errors []string
-	var writeError bool
-
-	usedNames := make(map[string]int)
-	for _, att := range attachments {
-		if att.ContentHash == "" {
-			errors = append(errors, fmt.Sprintf("%s: missing content hash", att.Filename))
-			continue
-		}
-
-		storagePath := filepath.Join(attachmentsDir, att.ContentHash[:2], att.ContentHash)
-
-		srcFile, err := os.Open(storagePath)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %v", att.Filename, err))
-			continue
-		}
-
-		// Use filepath.Base to prevent Zip Slip (path traversal) attacks
-		filename := filepath.Base(att.Filename)
-		if filename == "" || filename == "." {
-			filename = att.ContentHash
-		}
-		baseKey := filename
-		if count, exists := usedNames[baseKey]; exists {
-			ext := filepath.Ext(filename)
-			base := filename[:len(filename)-len(ext)]
-			filename = fmt.Sprintf("%s_%d%s", base, count+1, ext)
-			usedNames[baseKey] = count + 1
-		} else {
-			usedNames[baseKey] = 1
-		}
-
-		w, err := zipWriter.Create(filename)
-		if err != nil {
-			srcFile.Close()
-			errors = append(errors, fmt.Sprintf("%s: zip write error: %v", att.Filename, err))
-			writeError = true
-			continue
-		}
-
-		n, err := io.Copy(w, srcFile)
-		srcFile.Close()
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s: zip write error: %v", att.Filename, err))
-			writeError = true
-			continue
-		}
-
-		exportedCount++
-		totalSize += n
-	}
-
-	// Close zip writer first - check for errors as this finalizes the archive
-	if err := zipWriter.Close(); err != nil {
-		errors = append(errors, fmt.Sprintf("zip finalization error: %v", err))
-		writeError = true
-	}
-	if err := zipFile.Close(); err != nil {
-		errors = append(errors, fmt.Sprintf("file close error: %v", err))
-		writeError = true
-	}
-
-	// Build result message
-	if exportedCount == 0 || writeError {
-		os.Remove(zipFilename)
-		if writeError {
-			return exportResultMsg{result: "Export failed due to write errors. Zip file removed.\n\nErrors:\n" + strings.Join(errors, "\n")}
-		}
-		return exportResultMsg{result: "No attachments exported.\n\nErrors:\n" + strings.Join(errors, "\n")}
-	}
-
-	cwd, _ := os.Getwd()
-	fullPath := filepath.Join(cwd, zipFilename)
-	result := fmt.Sprintf("Exported %d attachment(s) (%s)\n\nSaved to:\n%s",
-		exportedCount, formatBytesLong(totalSize), fullPath)
-	if len(errors) > 0 {
-		result += "\n\nErrors:\n" + strings.Join(errors, "\n")
-	}
-	return exportResultMsg{result: result}
-}
-
-// sanitizeFilename removes or replaces characters that are invalid in filenames.
-func sanitizeFilename(s string) string {
-	var result []rune
-	for _, r := range s {
-		switch r {
-		case '/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r', '\t':
-			result = append(result, '_')
-		default:
-			result = append(result, r)
-		}
-	}
-	return string(result)
-}
-
-
-// formatBytesLong formats bytes with full precision for export results.
-func formatBytesLong(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}

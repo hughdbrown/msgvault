@@ -1,11 +1,6 @@
 package tui
 
 import (
-	"context"
-	"fmt"
-	"time"
-
-	"github.com/wesm/msgvault/internal/deletion"
 	"github.com/wesm/msgvault/internal/query"
 )
 
