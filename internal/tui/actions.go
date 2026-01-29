@@ -139,23 +139,22 @@ func (c *ActionController) StageForDeletion(aggregateSelection map[string]bool, 
 		manifest.Filters.Account = accounts[0].Identifier
 	}
 
-	// Set context filters from aggregates (use sorted first key for determinism)
+	// Set context filters from all selected aggregates
 	if len(aggregateSelection) > 0 {
 		keys := make([]string, 0, len(aggregateSelection))
 		for key := range aggregateSelection {
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
-		firstKey := keys[0]
 		switch aggregateViewType {
 		case query.ViewSenders:
-			manifest.Filters.Sender = firstKey
+			manifest.Filters.Senders = keys
 		case query.ViewRecipients:
-			manifest.Filters.Recipient = firstKey
+			manifest.Filters.Recipients = keys
 		case query.ViewDomains:
-			manifest.Filters.SenderDomain = firstKey
+			manifest.Filters.SenderDomain = keys
 		case query.ViewLabels:
-			manifest.Filters.Label = firstKey
+			manifest.Filters.Labels = keys
 		}
 	}
 

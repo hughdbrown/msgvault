@@ -43,8 +43,8 @@ func TestStageForDeletion_FromAggregateSelection(t *testing.T) {
 	if len(manifest.GmailIDs) != 3 {
 		t.Errorf("expected 3 gmail IDs, got %d", len(manifest.GmailIDs))
 	}
-	if manifest.Filters.Sender != "alice@example.com" {
-		t.Errorf("expected sender filter 'alice@example.com', got %q", manifest.Filters.Sender)
+	if len(manifest.Filters.Senders) != 1 || manifest.Filters.Senders[0] != "alice@example.com" {
+		t.Errorf("expected senders [alice@example.com], got %v", manifest.Filters.Senders)
 	}
 	if manifest.CreatedBy != "tui" {
 		t.Errorf("expected createdBy 'tui', got %q", manifest.CreatedBy)
@@ -111,8 +111,11 @@ func TestStageForDeletion_MultipleAggregates_DeterministicFilter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if manifest.Filters.Sender != "alice@example.com" {
-			t.Fatalf("iteration %d: expected sender 'alice@example.com', got %q", i, manifest.Filters.Sender)
+		if len(manifest.Filters.Senders) != 3 ||
+			manifest.Filters.Senders[0] != "alice@example.com" ||
+			manifest.Filters.Senders[1] != "bob@example.com" ||
+			manifest.Filters.Senders[2] != "charlie@example.com" {
+			t.Fatalf("iteration %d: expected sorted senders [alice bob charlie], got %v", i, manifest.Filters.Senders)
 		}
 	}
 }
@@ -125,23 +128,23 @@ func TestStageForDeletion_ViewTypes(t *testing.T) {
 		check    func(t *testing.T, f deletion.Filters)
 	}{
 		{"senders", query.ViewSenders, "a@b.com", func(t *testing.T, f deletion.Filters) {
-			if f.Sender != "a@b.com" {
-				t.Errorf("expected sender a@b.com, got %q", f.Sender)
+			if len(f.Senders) != 1 || f.Senders[0] != "a@b.com" {
+				t.Errorf("expected senders [a@b.com], got %v", f.Senders)
 			}
 		}},
 		{"recipients", query.ViewRecipients, "c@d.com", func(t *testing.T, f deletion.Filters) {
-			if f.Recipient != "c@d.com" {
-				t.Errorf("expected recipient c@d.com, got %q", f.Recipient)
+			if len(f.Recipients) != 1 || f.Recipients[0] != "c@d.com" {
+				t.Errorf("expected recipients [c@d.com], got %v", f.Recipients)
 			}
 		}},
 		{"domains", query.ViewDomains, "example.com", func(t *testing.T, f deletion.Filters) {
-			if f.SenderDomain != "example.com" {
-				t.Errorf("expected domain example.com, got %q", f.SenderDomain)
+			if len(f.SenderDomain) != 1 || f.SenderDomain[0] != "example.com" {
+				t.Errorf("expected sender_domains [example.com], got %v", f.SenderDomain)
 			}
 		}},
 		{"labels", query.ViewLabels, "INBOX", func(t *testing.T, f deletion.Filters) {
-			if f.Label != "INBOX" {
-				t.Errorf("expected label INBOX, got %q", f.Label)
+			if len(f.Labels) != 1 || f.Labels[0] != "INBOX" {
+				t.Errorf("expected labels [INBOX], got %v", f.Labels)
 			}
 		}},
 	}

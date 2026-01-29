@@ -113,8 +113,8 @@ func TestManifest_SaveAndLoad(t *testing.T) {
 	// Create and save manifest
 	m := NewManifest("save test", []string{"id1", "id2"})
 	m.Filters = Filters{
-		Sender: "test@example.com",
-		After:  "2024-01-01",
+		Senders: []string{"test@example.com"},
+		After:   "2024-01-01",
 	}
 	m.Summary = &Summary{
 		MessageCount:   2,
@@ -141,8 +141,8 @@ func TestManifest_SaveAndLoad(t *testing.T) {
 	if len(loaded.GmailIDs) != len(m.GmailIDs) {
 		t.Errorf("GmailIDs length = %d, want %d", len(loaded.GmailIDs), len(m.GmailIDs))
 	}
-	if loaded.Filters.Sender != m.Filters.Sender {
-		t.Errorf("Filters.Sender = %q, want %q", loaded.Filters.Sender, m.Filters.Sender)
+	if len(loaded.Filters.Senders) != len(m.Filters.Senders) || (len(loaded.Filters.Senders) > 0 && loaded.Filters.Senders[0] != m.Filters.Senders[0]) {
+		t.Errorf("Filters.Senders = %v, want %v", loaded.Filters.Senders, m.Filters.Senders)
 	}
 	if loaded.Summary == nil {
 		t.Fatal("Summary is nil after load")
@@ -289,7 +289,7 @@ func TestManager_CreateAndListManifests(t *testing.T) {
 	mgr := testManager(t)
 
 	// Create manifests
-	m1, err := mgr.CreateManifest("first batch", []string{"a", "b"}, Filters{Sender: "alice@example.com"})
+	m1, err := mgr.CreateManifest("first batch", []string{"a", "b"}, Filters{Senders: []string{"alice@example.com"}})
 	if err != nil {
 		t.Fatalf("CreateManifest() error = %v", err)
 	}
