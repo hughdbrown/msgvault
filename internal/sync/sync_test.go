@@ -264,12 +264,9 @@ func TestIncrementalSyncNoSource(t *testing.T) {
 func TestIncrementalSyncNoHistoryID(t *testing.T) {
 	env := newTestEnv(t)
 
-	_, err := env.Store.GetOrCreateSource("gmail", testEmail)
-	if err != nil {
-		t.Fatalf("GetOrCreateSource: %v", err)
-	}
+	env.MustCreateSource(t)
 
-	_, err = env.Syncer.Incremental(env.Context, testEmail)
+	_, err := env.Syncer.Incremental(env.Context, testEmail)
 	if err == nil {
 		t.Error("expected error for incremental sync without history ID")
 	}
@@ -434,10 +431,7 @@ func TestIncrementalSyncWithLabelRemoved(t *testing.T) {
 
 func TestIncrementalSyncLabelAddedToNewMessage(t *testing.T) {
 	env := newTestEnv(t)
-	env.SetupSource(t, "12340")
-
-	// Pre-populate labels so handleLabelChange can work
-	source, _ := env.Store.GetOrCreateSource("gmail", testEmail)
+	source := env.SetupSource(t, "12340")
 	if _, err := env.Store.EnsureLabel(source.ID, "INBOX", "Inbox", "system"); err != nil {
 		t.Fatalf("EnsureLabel INBOX: %v", err)
 	}
@@ -705,11 +699,7 @@ func TestFullSyncResumeWithCursor(t *testing.T) {
 	env.Mock.AddMessage("msg3", testMIME, []string{"INBOX"})
 	env.Mock.AddMessage("msg4", testMIME, []string{"INBOX"})
 
-	// Setup: Create source
-	source, err := env.Store.GetOrCreateSource("gmail", testEmail)
-	if err != nil {
-		t.Fatalf("GetOrCreateSource: %v", err)
-	}
+	source := env.MustCreateSource(t)
 
 	// Process just page 1
 	env.Mock.MessagePages = [][]string{{"msg1", "msg2"}}

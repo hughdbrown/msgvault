@@ -66,7 +66,8 @@ func NewTestEnv(t *testing.T) (*TestEnv, func()) {
 	return env, cleanup
 }
 
-func (e *TestEnv) SetupSource(t *testing.T, historyID string) {
+// SetupSource creates a source and sets its sync cursor, returning the source.
+func (e *TestEnv) SetupSource(t *testing.T, historyID string) *store.Source {
 	t.Helper()
 	source, err := e.Store.GetOrCreateSource("gmail", e.Mock.Profile.EmailAddress)
 	if err != nil {
@@ -75,6 +76,17 @@ func (e *TestEnv) SetupSource(t *testing.T, historyID string) {
 	if err := e.Store.UpdateSourceSyncCursor(source.ID, historyID); err != nil {
 		t.Fatalf("UpdateSourceSyncCursor: %v", err)
 	}
+	return source
+}
+
+// MustCreateSource creates a source without setting a sync cursor.
+func (e *TestEnv) MustCreateSource(t *testing.T) *store.Source {
+	t.Helper()
+	source, err := e.Store.GetOrCreateSource("gmail", e.Mock.Profile.EmailAddress)
+	if err != nil {
+		t.Fatalf("GetOrCreateSource: %v", err)
+	}
+	return source
 }
 
 // newTestEnv creates a TestEnv and registers cleanup via t.Cleanup.
