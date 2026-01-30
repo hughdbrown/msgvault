@@ -99,10 +99,16 @@ type TestModelBuilder struct {
 	accounts      []query.AccountInfo
 	width         int
 	height        int
+	pageSize      int // explicit override; 0 means auto-calculate from height
 	viewType      query.ViewType
 	level         viewLevel
 	dataDir       string
 	version       string
+	loading       *bool // nil = auto (false if data provided), non-nil = explicit
+	modal         *modalType
+	accountFilter *int64
+	stats         *query.TotalStats
+	contextStats  *query.TotalStats
 }
 
 func NewBuilder() *TestModelBuilder {
@@ -155,6 +161,36 @@ func (b *TestModelBuilder) WithViewType(vt query.ViewType) *TestModelBuilder {
 	return b
 }
 
+func (b *TestModelBuilder) WithPageSize(size int) *TestModelBuilder {
+	b.pageSize = size
+	return b
+}
+
+func (b *TestModelBuilder) WithLoading(loading bool) *TestModelBuilder {
+	b.loading = &loading
+	return b
+}
+
+func (b *TestModelBuilder) WithModal(mt modalType) *TestModelBuilder {
+	b.modal = &mt
+	return b
+}
+
+func (b *TestModelBuilder) WithAccountFilter(id *int64) *TestModelBuilder {
+	b.accountFilter = id
+	return b
+}
+
+func (b *TestModelBuilder) WithStats(stats *query.TotalStats) *TestModelBuilder {
+	b.stats = stats
+	return b
+}
+
+func (b *TestModelBuilder) WithContextStats(stats *query.TotalStats) *TestModelBuilder {
+	b.contextStats = stats
+	return b
+}
+
 func (b *TestModelBuilder) Build() Model {
 	engine := &mockEngine{
 		rows:          b.rows,
@@ -166,9 +202,13 @@ func (b *TestModelBuilder) Build() Model {
 	model := New(engine, Options{DataDir: b.dataDir, Version: b.version})
 	model.width = b.width
 	model.height = b.height
-	model.pageSize = b.height - 5
-	if model.pageSize < 1 {
-		model.pageSize = 1
+	if b.pageSize > 0 {
+		model.pageSize = b.pageSize
+	} else {
+		model.pageSize = b.height - 5
+		if model.pageSize < 1 {
+			model.pageSize = 1
+		}
 	}
 
 	// Pre-populate data if provided
@@ -182,10 +222,14 @@ func (b *TestModelBuilder) Build() Model {
 		model.messageDetail = b.messageDetail
 	}
 
-	// Assuming if we build with data, we are not loading
-	model.loading = false
+	// Loading: explicit if set, otherwise false when data is provided
+	if b.loading != nil {
+		model.loading = *b.loading
+	} else {
+		model.loading = false
+	}
 
-	if b.level != levelAggregates { // Assuming levelAggregates is 0/default
+	if b.level != levelAggregates {
 		model.level = b.level
 	}
 
@@ -195,6 +239,22 @@ func (b *TestModelBuilder) Build() Model {
 
 	if len(b.accounts) > 0 {
 		model.accounts = b.accounts
+	}
+
+	if b.modal != nil {
+		model.modal = *b.modal
+	}
+
+	if b.accountFilter != nil {
+		model.accountFilter = b.accountFilter
+	}
+
+	if b.stats != nil {
+		model.stats = b.stats
+	}
+
+	if b.contextStats != nil {
+		model.contextStats = b.contextStats
 	}
 
 	return model
@@ -221,18 +281,6 @@ func assertLevel(t *testing.T, m Model, expected viewLevel) {
 	if m.level != expected {
 		t.Errorf("expected level %v, got %v", expected, m.level)
 	}
-}
-
-// makeMessages creates a slice of MessageSummary for testing
-func makeMessages(count int) []query.MessageSummary {
-	msgs := make([]query.MessageSummary, count)
-	for i := 0; i < count; i++ {
-		msgs[i] = query.MessageSummary{
-			ID:      int64(i + 1),
-			Subject: fmt.Sprintf("Subject %d", i+1),
-		}
-	}
-	return msgs
 }
 
 // Common test data
@@ -388,6 +436,68 @@ func assertSelectionCount(t *testing.T, m Model, expected int) {
 	}
 }
 
+// -----------------------------------------------------------------------------
+// Key Application Helpers - remove handleXKeys casting boilerplate
+// -----------------------------------------------------------------------------
+
+// applyAggregateKey sends a key through handleAggregateKeys and returns the concrete Model.
+func applyAggregateKey(t *testing.T, m Model, k tea.KeyMsg) Model {
+	t.Helper()
+	newModel, _ := m.handleAggregateKeys(k)
+	return newModel.(Model)
+}
+
+// applyMessageListKey sends a key through handleMessageListKeys and returns the concrete Model.
+func applyMessageListKey(t *testing.T, m Model, k tea.KeyMsg) Model {
+	t.Helper()
+	newModel, _ := m.handleMessageListKeys(k)
+	return newModel.(Model)
+}
+
+// applyModalKey sends a key through handleModalKeys and returns the concrete Model and Cmd.
+func applyModalKey(t *testing.T, m Model, k tea.KeyMsg) (Model, tea.Cmd) {
+	t.Helper()
+	newModel, cmd := m.handleModalKeys(k)
+	return newModel.(Model), cmd
+}
+
+// applyDetailKey sends a key through handleMessageDetailKeys and returns the concrete Model.
+func applyDetailKey(t *testing.T, m Model, k tea.KeyMsg) Model {
+	t.Helper()
+	newModel, _ := m.handleMessageDetailKeys(k)
+	return newModel.(Model)
+}
+
+// -----------------------------------------------------------------------------
+// View Fit Helpers - centralize line counting and resize logic
+// -----------------------------------------------------------------------------
+
+// countViewLines returns the number of non-trailing-empty lines in a view string.
+func countViewLines(view string) int {
+	lines := strings.Split(view, "\n")
+	actual := len(lines)
+	if actual > 0 && lines[actual-1] == "" {
+		actual--
+	}
+	return actual
+}
+
+// assertViewFitsHeight checks that the rendered view fits within the given height.
+func assertViewFitsHeight(t *testing.T, view string, height int) {
+	t.Helper()
+	actual := countViewLines(view)
+	if actual > height {
+		t.Errorf("View has %d lines but terminal height is %d", actual, height)
+	}
+}
+
+// resizeModel sends a WindowSizeMsg and returns the updated model.
+func resizeModel(t *testing.T, m Model, w, h int) Model {
+	t.Helper()
+	newModel, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	return newModel.(Model)
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -458,30 +568,21 @@ func TestSelectAllVisibleWithScroll(t *testing.T) {
 }
 
 func TestSelectionClearedOnViewSwitch(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 10},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "alice@example.com", Count: 10}).
+		WithPageSize(10).WithSize(100, 20).
+		Build()
 
 	// Select an item
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(key(' '))
-	model = newModel.(Model)
+	model = applyAggregateKey(t, model, key(' '))
 
 	if len(model.selection.aggregateKeys) != 1 {
 		t.Fatal("expected 1 selected")
 	}
 
 	// Switch view with Tab
-	newModel, _ = model.handleAggregateKeys(keyTab())
-	model = newModel.(Model)
+	model = applyAggregateKey(t, model, keyTab())
 
 	// Selection should be cleared
 	if len(model.selection.aggregateKeys) != 0 {
@@ -495,26 +596,17 @@ func TestSelectionClearedOnViewSwitch(t *testing.T) {
 }
 
 func TestSelectionClearedOnShiftTab(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 10},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "alice@example.com", Count: 10}).
+		WithPageSize(10).WithSize(100, 20).
+		Build()
 
 	// Select an item
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(key(' '))
-	model = newModel.(Model)
+	model = applyAggregateKey(t, model, key(' '))
 
 	// Switch view with Shift+Tab
-	newModel, _ = model.handleAggregateKeys(keyShiftTab())
-	model = newModel.(Model)
+	model = applyAggregateKey(t, model, keyShiftTab())
 
 	// Selection should be cleared
 	if len(model.selection.aggregateKeys) != 0 {
@@ -523,30 +615,21 @@ func TestSelectionClearedOnShiftTab(t *testing.T) {
 }
 
 func TestClearSelection(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 10},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "alice@example.com", Count: 10}).
+		WithPageSize(10).WithSize(100, 20).
+		Build()
 
 	// Select an item
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(key(' '))
-	model = newModel.(Model)
+	model = applyAggregateKey(t, model, key(' '))
 
 	if len(model.selection.aggregateKeys) != 1 {
 		t.Fatal("expected 1 selected")
 	}
 
 	// Clear with 'x'
-	newModel, _ = model.handleAggregateKeys(key('x'))
-	model = newModel.(Model)
+	model = applyAggregateKey(t, model, key('x'))
 
 	if len(model.selection.aggregateKeys) != 0 {
 		t.Errorf("expected selection cleared, got %d items", len(model.selection.aggregateKeys))
@@ -580,32 +663,24 @@ func TestStageForDeletionWithAggregateSelection(t *testing.T) {
 }
 
 func TestStageForDeletionWithAccountFilter(t *testing.T) {
-	engine := &mockEngine{
-		rows:     []query.AggregateRow{{Key: "alice@example.com", Count: 2}},
-		gmailIDs: []string{"msg1", "msg2"},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-
-	// Set up accounts and account filter
-	model.accounts = []query.AccountInfo{
-		{ID: 1, Identifier: "user1@gmail.com"},
-		{ID: 2, Identifier: "user2@gmail.com"},
-	}
 	accountID := int64(1)
-	model.accountFilter = &accountID
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "alice@example.com", Count: 2}).
+		WithGmailIDs("msg1", "msg2").
+		WithPageSize(10).WithSize(100, 20).
+		WithAccounts(
+			query.AccountInfo{ID: 1, Identifier: "user1@gmail.com"},
+			query.AccountInfo{ID: 2, Identifier: "user2@gmail.com"},
+		).
+		WithAccountFilter(&accountID).
+		Build()
 
 	// Select an aggregate
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(key(' '))
-	model = newModel.(Model)
+	model = applyAggregateKey(t, model, key(' '))
 
 	// Stage for deletion
-	newModel, _ = model.stageForDeletion()
+	newModel, _ := model.stageForDeletion()
 	model = newModel.(Model)
 
 	// Should have account set in manifest
@@ -618,30 +693,19 @@ func TestStageForDeletionWithAccountFilter(t *testing.T) {
 }
 
 func TestStageForDeletionWithSingleAccount(t *testing.T) {
-	engine := &mockEngine{
-		rows:     []query.AggregateRow{{Key: "alice@example.com", Count: 2}},
-		gmailIDs: []string{"msg1", "msg2"},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-
-	// Set up single account with no filter
-	model.accounts = []query.AccountInfo{
-		{ID: 1, Identifier: "only@gmail.com"},
-	}
-	model.accountFilter = nil // No filter set
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "alice@example.com", Count: 2}).
+		WithGmailIDs("msg1", "msg2").
+		WithPageSize(10).WithSize(100, 20).
+		WithAccounts(query.AccountInfo{ID: 1, Identifier: "only@gmail.com"}).
+		Build()
 
 	// Select an aggregate
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(key(' '))
-	model = newModel.(Model)
+	model = applyAggregateKey(t, model, key(' '))
 
 	// Stage for deletion
-	newModel, _ = model.stageForDeletion()
+	newModel, _ := model.stageForDeletion()
 	model = newModel.(Model)
 
 	// Should auto-use the single account
@@ -654,31 +718,22 @@ func TestStageForDeletionWithSingleAccount(t *testing.T) {
 }
 
 func TestStageForDeletionWithMultipleAccountsNoFilter(t *testing.T) {
-	engine := &mockEngine{
-		rows:     []query.AggregateRow{{Key: "alice@example.com", Count: 2}},
-		gmailIDs: []string{"msg1", "msg2"},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-
-	// Set up multiple accounts with no filter
-	model.accounts = []query.AccountInfo{
-		{ID: 1, Identifier: "user1@gmail.com"},
-		{ID: 2, Identifier: "user2@gmail.com"},
-	}
-	model.accountFilter = nil // No filter set
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "alice@example.com", Count: 2}).
+		WithGmailIDs("msg1", "msg2").
+		WithPageSize(10).WithSize(100, 20).
+		WithAccounts(
+			query.AccountInfo{ID: 1, Identifier: "user1@gmail.com"},
+			query.AccountInfo{ID: 2, Identifier: "user2@gmail.com"},
+		).
+		Build()
 
 	// Select an aggregate
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(key(' '))
-	model = newModel.(Model)
+	model = applyAggregateKey(t, model, key(' '))
 
 	// Stage for deletion
-	newModel, _ = model.stageForDeletion()
+	newModel, _ := model.stageForDeletion()
 	model = newModel.(Model)
 
 	// Should leave account empty (requires --account flag)
@@ -691,33 +746,24 @@ func TestStageForDeletionWithMultipleAccountsNoFilter(t *testing.T) {
 }
 
 func TestStageForDeletionWithAccountFilterNotFound(t *testing.T) {
-	engine := &mockEngine{
-		rows:     []query.AggregateRow{{Key: "alice@example.com", Count: 2}},
-		gmailIDs: []string{"msg1", "msg2"},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.loading = false // Ensure view renders properly
-
-	// Set up accounts but filter points to non-existent ID
-	model.accounts = []query.AccountInfo{
-		{ID: 1, Identifier: "user1@gmail.com"},
-		{ID: 2, Identifier: "user2@gmail.com"},
-	}
 	nonExistentID := int64(999) // ID not in accounts list
-	model.accountFilter = &nonExistentID
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "alice@example.com", Count: 2}).
+		WithGmailIDs("msg1", "msg2").
+		WithPageSize(10).WithSize(100, 20).
+		WithAccounts(
+			query.AccountInfo{ID: 1, Identifier: "user1@gmail.com"},
+			query.AccountInfo{ID: 2, Identifier: "user2@gmail.com"},
+		).
+		WithAccountFilter(&nonExistentID).
+		Build()
 
 	// Select an aggregate
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(key(' '))
-	model = newModel.(Model)
+	model = applyAggregateKey(t, model, key(' '))
 
 	// Stage for deletion - should proceed despite filter not found
-	newModel, _ = model.stageForDeletion()
+	newModel, _ := model.stageForDeletion()
 	model = newModel.(Model)
 
 	// Should still create manifest with empty account (warning logged)
@@ -766,18 +812,13 @@ func TestAKeyShowsAllMessages(t *testing.T) {
 }
 
 func TestModalDismiss(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.modal = modalDeleteResult
+	model := NewBuilder().
+		WithModal(modalDeleteResult).
+		Build()
 	model.modalResult = "Test result"
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
 
 	// Any key should dismiss result modal
-	newModel, _ := model.handleModalKeys(key('x'))
-	model = newModel.(Model)
+	model, _ = applyModalKey(t, model, key('x'))
 
 	if model.modal != modalNone {
 		t.Errorf("expected modalNone after dismissal, got %v", model.modal)
@@ -789,18 +830,13 @@ func TestModalDismiss(t *testing.T) {
 }
 
 func TestConfirmModalCancel(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.modal = modalDeleteConfirm
+	model := NewBuilder().
+		WithModal(modalDeleteConfirm).
+		Build()
 	model.pendingManifest = &deletion.Manifest{}
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
 
 	// 'n' should cancel
-	newModel, _ := model.handleModalKeys(key('n'))
-	model = newModel.(Model)
+	model, _ = applyModalKey(t, model, key('n'))
 
 	if model.modal != modalNone {
 		t.Errorf("expected modalNone after cancel, got %v", model.modal)
@@ -849,14 +885,9 @@ func TestHasSelection(t *testing.T) {
 }
 
 func TestStaleAsyncResponsesIgnored(t *testing.T) {
-	engine := &mockEngine{
-		messages: []query.MessageSummary{
-			{ID: 1, Subject: "Test"},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageList
+	model := NewBuilder().
+		WithLevel(levelMessageList).
+		Build()
 	model.loadRequestID = 5 // Current request ID
 
 	// Simulate a stale response with old request ID
@@ -892,14 +923,12 @@ func TestStaleAsyncResponsesIgnored(t *testing.T) {
 }
 
 func TestStaleDetailResponsesIgnored(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageDetail
+	model := NewBuilder().
+		WithLevel(levelMessageDetail).
+		WithSize(100, 30).
+		WithPageSize(20).
+		Build()
 	model.detailRequestID = 10 // Current request ID
-	model.width = 100          // Set realistic width
-	model.height = 30
-	model.pageSize = 20
 
 	// Simulate a stale response with old request ID
 	staleMsg := messageDetailLoadedMsg{
@@ -934,26 +963,21 @@ func TestStaleDetailResponsesIgnored(t *testing.T) {
 }
 
 func TestDetailLineCountResetOnLoad(t *testing.T) {
-	engine := &mockEngine{
-		messages: []query.MessageSummary{
-			{ID: 1, Subject: "Message 1"},
-			{ID: 2, Subject: "Message 2"},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.messages = engine.messages
-	model.level = levelMessageList
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "Message 1"},
+			query.MessageSummary{ID: 2, Subject: "Message 2"},
+		).
+		WithLevel(levelMessageList).
+		WithSize(100, 30).
+		WithPageSize(20).
+		Build()
 	model.detailLineCount = 100 // Simulate previous message with 100 lines
 	model.detailScroll = 50     // Simulate scrolled position
-	model.pageSize = 20
-	model.width = 100
-	model.height = 30
 
 	// Trigger drill-down to detail view
 	model.cursor = 0
-	newModel, _ := model.handleMessageListKeys(keyEnter())
-	m := newModel.(Model)
+	m := applyMessageListKey(t, model, keyEnter())
 
 	// detailLineCount and detailScroll should be reset
 	if m.detailLineCount != 0 {
@@ -968,11 +992,10 @@ func TestDetailLineCountResetOnLoad(t *testing.T) {
 }
 
 func TestDetailScrollClamping(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageDetail
-	model.pageSize = 10
+	model := NewBuilder().
+		WithLevel(levelMessageDetail).
+		WithPageSize(10).
+		Build()
 	model.detailLineCount = 25 // 25 lines total
 	model.detailScroll = 0
 
@@ -998,17 +1021,15 @@ func TestDetailScrollClamping(t *testing.T) {
 }
 
 func TestResizeRecalculatesDetailLineCount(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageDetail
-	model.messageDetail = &query.MessageDetail{
-		Subject:  "Test Subject",
-		BodyText: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
-	}
-	model.width = 80
-	model.height = 20
-	model.pageSize = 14
+	model := NewBuilder().
+		WithLevel(levelMessageDetail).
+		WithDetail(&query.MessageDetail{
+			Subject:  "Test Subject",
+			BodyText: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
+		}).
+		WithSize(80, 20).
+		WithPageSize(14).
+		Build()
 
 	// Calculate initial line count
 	model.updateDetailLineCount()
@@ -1040,17 +1061,15 @@ func TestResizeRecalculatesDetailLineCount(t *testing.T) {
 }
 
 func TestEndKeyWithZeroLineCount(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageDetail
-	model.pageSize = 20
+	model := NewBuilder().
+		WithLevel(levelMessageDetail).
+		WithPageSize(20).
+		Build()
 	model.detailLineCount = 0 // No content yet (loading)
 	model.detailScroll = 0
 
 	// Press 'G' (end key) with zero line count
-	newModel, _ := model.handleMessageDetailKeys(key('G'))
-	m := newModel.(Model)
+	m := applyDetailKey(t, model, key('G'))
 
 	// Should not crash and scroll should remain 0
 	if m.detailScroll != 0 {
@@ -1081,17 +1100,10 @@ func TestQuitConfirmationModal(t *testing.T) {
 }
 
 func TestQuitConfirmationConfirm(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.modal = modalQuitConfirm
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
+	model := NewBuilder().WithModal(modalQuitConfirm).WithPageSize(10).WithSize(100, 20).Build()
 
 	// Press 'y' to confirm quit
-	newModel, cmd := model.handleModalKeys(key('y'))
-	m := newModel.(Model)
+	m, cmd := applyModalKey(t, model, key('y'))
 
 	if !m.quitting {
 		t.Error("expected quitting = true")
@@ -1102,20 +1114,16 @@ func TestQuitConfirmationConfirm(t *testing.T) {
 }
 
 func TestAccountSelectorModal(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.accounts = []query.AccountInfo{
-		{ID: 1, Identifier: "alice@example.com"},
-		{ID: 2, Identifier: "bob@example.com"},
-	}
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
+	model := NewBuilder().
+		WithAccounts(
+			query.AccountInfo{ID: 1, Identifier: "alice@example.com"},
+			query.AccountInfo{ID: 2, Identifier: "bob@example.com"},
+		).
+		WithPageSize(10).WithSize(100, 20).
+		Build()
 
 	// Press 'A' to open account selector
-	newModel, _ := model.handleAggregateKeys(key('A'))
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, key('A'))
 
 	if m.modal != modalAccountSelector {
 		t.Errorf("expected modalAccountSelector, got %v", m.modal)
@@ -1125,15 +1133,14 @@ func TestAccountSelectorModal(t *testing.T) {
 	}
 
 	// Navigate down
-	newModel, _ = m.handleModalKeys(key('j'))
-	m = newModel.(Model)
+	m, _ = applyModalKey(t, m, key('j'))
 	if m.modalCursor != 1 {
 		t.Errorf("expected modalCursor = 1, got %d", m.modalCursor)
 	}
 
 	// Select account
-	newModel, cmd := m.handleModalKeys(keyEnter())
-	m = newModel.(Model)
+	var cmd tea.Cmd
+	m, cmd = applyModalKey(t, m, keyEnter())
 
 	if m.modal != modalNone {
 		t.Errorf("expected modalNone after selection, got %v", m.modal)
@@ -1147,17 +1154,10 @@ func TestAccountSelectorModal(t *testing.T) {
 }
 
 func TestAttachmentFilterModal(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.attachmentFilter = false
+	model := NewBuilder().WithPageSize(10).WithSize(100, 20).Build()
 
 	// Press 'f' to open filter modal
-	newModel, _ := model.handleAggregateKeys(key('f'))
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, key('f'))
 
 	if m.modal != modalAttachmentFilter {
 		t.Errorf("expected modalAttachmentFilter, got %v", m.modal)
@@ -1167,15 +1167,13 @@ func TestAttachmentFilterModal(t *testing.T) {
 	}
 
 	// Navigate down to "With Attachments"
-	newModel, _ = m.handleModalKeys(key('j'))
-	m = newModel.(Model)
+	m, _ = applyModalKey(t, m, key('j'))
 	if m.modalCursor != 1 {
 		t.Errorf("expected modalCursor = 1, got %d", m.modalCursor)
 	}
 
 	// Select "With Attachments"
-	newModel, _ = m.handleModalKeys(keyEnter())
-	m = newModel.(Model)
+	m, _ = applyModalKey(t, m, keyEnter())
 
 	if m.modal != modalNone {
 		t.Errorf("expected modalNone after selection, got %v", m.modal)
@@ -1186,18 +1184,10 @@ func TestAttachmentFilterModal(t *testing.T) {
 }
 
 func TestAttachmentFilterInMessageList(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageList
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.attachmentFilter = false
+	model := NewBuilder().WithLevel(levelMessageList).WithPageSize(10).WithSize(100, 20).Build()
 
 	// Press 'f' to open filter modal in message list
-	newModel, _ := model.handleMessageListKeys(key('f'))
-	m := newModel.(Model)
+	m := applyMessageListKey(t, model, key('f'))
 
 	if m.modal != modalAttachmentFilter {
 		t.Errorf("expected modalAttachmentFilter, got %v", m.modal)
@@ -1205,8 +1195,8 @@ func TestAttachmentFilterInMessageList(t *testing.T) {
 
 	// Select "With Attachments" and verify reload is triggered
 	m.modalCursor = 1
-	newModel, cmd := m.handleModalKeys(keyEnter())
-	m = newModel.(Model)
+	var cmd tea.Cmd
+	m, cmd = applyModalKey(t, m, keyEnter())
 
 	if !m.attachmentFilter {
 		t.Error("expected attachmentFilter = true")
@@ -1217,23 +1207,17 @@ func TestAttachmentFilterInMessageList(t *testing.T) {
 }
 
 func TestSubGroupingNavigation(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 10},
-			{Key: "bob@example.com", Count: 5},
-		},
-		messages: []query.MessageSummary{
-			{ID: 1, Subject: "Test 1"},
-			{ID: 2, Subject: "Test 2"},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 10},
+		{Key: "bob@example.com", Count: 5},
+	}
+	msgs := []query.MessageSummary{
+		{ID: 1, Subject: "Test 1"},
+		{ID: 2, Subject: "Test 2"},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.rows = engine.rows
-	model.viewType = query.ViewSenders
+	model := NewBuilder().WithRows(rows...).WithMessages(msgs...).
+		WithPageSize(10).WithSize(100, 20).WithViewType(query.ViewSenders).Build()
 
 	// Press Enter to drill into first sender - should go to message list (not sub-aggregate)
 	newModel, cmd := model.handleAggregateKeys(keyEnter())
@@ -1261,7 +1245,7 @@ func TestSubGroupingNavigation(t *testing.T) {
 	}
 
 	// Test Tab from message list goes to sub-aggregate view
-	m.messages = engine.messages // Simulate messages loaded
+	m.messages = msgs // Simulate messages loaded
 	newModel, cmd = m.handleMessageListKeys(keyTab())
 	m = newModel.(Model)
 
@@ -1277,7 +1261,7 @@ func TestSubGroupingNavigation(t *testing.T) {
 	}
 
 	// Test Tab in sub-aggregate cycles views (skipping drill view type)
-	m.rows = engine.rows // Simulate data loaded
+	m.rows = rows // Simulate data loaded
 	newModel, cmd = m.handleAggregateKeys(keyTab())
 	m = newModel.(Model)
 
@@ -1290,9 +1274,8 @@ func TestSubGroupingNavigation(t *testing.T) {
 	}
 
 	// Test Esc goes back to message list (not all the way to aggregates)
-	m.rows = engine.rows
-	newModel, _ = m.handleAggregateKeys(keyEsc())
-	m = newModel.(Model)
+	m.rows = rows
+	m = applyAggregateKey(t, m, keyEsc())
 
 	if m.level != levelMessageList {
 		t.Errorf("expected levelMessageList after Esc from sub-aggregate, got %v", m.level)
@@ -1307,9 +1290,8 @@ func TestSubGroupingNavigation(t *testing.T) {
 	}
 
 	// Test Esc again goes back to aggregates
-	m.messages = engine.messages
-	newModel, _ = m.handleMessageListKeys(keyEsc())
-	m = newModel.(Model)
+	m.messages = msgs
+	m = applyMessageListKey(t, m, keyEsc())
 
 	if m.level != levelAggregates {
 		t.Errorf("expected levelAggregates after Esc from message list, got %v", m.level)
@@ -1323,13 +1305,7 @@ func TestSubGroupingNavigation(t *testing.T) {
 }
 
 func TestFillScreenDetailLineCount(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageDetail
-	model.width = 80
-	model.height = 24
-	model.pageSize = 19 // height - 5
+	model := NewBuilder().WithLevel(levelMessageDetail).WithSize(80, 24).WithPageSize(19).Build()
 
 	// detailPageSize = pageSize + 2 = 21
 	expectedLines := model.detailPageSize()
@@ -1364,14 +1340,10 @@ func TestFillScreenDetailLineCount(t *testing.T) {
 }
 
 func TestWindowSizeClampNegative(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
+	model := NewBuilder().Build()
 
 	// Simulate negative window size (can happen during terminal resize)
-	resizeMsg := tea.WindowSizeMsg{Width: -1, Height: -1}
-	newModel, _ := model.Update(resizeMsg)
-	m := newModel.(Model)
+	m := resizeModel(t, model, -1, -1)
 
 	if m.width < 0 {
 		t.Errorf("expected width >= 0, got %d", m.width)
@@ -1385,24 +1357,14 @@ func TestWindowSizeClampNegative(t *testing.T) {
 }
 
 func TestSubAggregateDrillDown(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "bob@example.com", Count: 3},
-		},
-		messages: []query.MessageSummary{
-			{ID: 1, Subject: "Test"},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelDrillDown
-	model.viewType = query.ViewRecipients
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "bob@example.com", Count: 3}).
+		WithMessages(query.MessageSummary{ID: 1, Subject: "Test"}).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelDrillDown).WithViewType(query.ViewRecipients).
+		Build()
 	model.drillViewType = query.ViewSenders
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
-	model.rows = engine.rows
 
 	// Press Enter on recipient - should go to message list with combined filter
 	newModel, cmd := model.handleAggregateKeys(keyEnter())
@@ -1446,11 +1408,7 @@ func TestSearchModalOpen(t *testing.T) {
 
 // TestSearchResultsDisplay verifies search results are displayed.
 func TestSearchResultsDisplay(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
+	model := NewBuilder().WithPageSize(10).WithSize(100, 20).Build()
 	model.searchQuery = "test query"
 	model.searchMode = searchModeFast
 	model.searchRequestID = 1
@@ -1480,11 +1438,7 @@ func TestSearchResultsDisplay(t *testing.T) {
 
 // TestSearchResultsStale verifies stale search results are ignored.
 func TestSearchResultsStale(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
+	model := NewBuilder().WithPageSize(10).WithSize(100, 20).Build()
 	model.searchRequestID = 2 // Current request is 2
 
 	// Simulate receiving stale results (requestID 1)
@@ -1506,16 +1460,13 @@ func TestSearchResultsStale(t *testing.T) {
 
 // TestInlineSearchTabToggleAtMessageList verifies Tab toggles mode and triggers search at message list level.
 func TestInlineSearchTabToggleAtMessageList(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelMessageList
+	model := NewBuilder().WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).
+		WithMessages(query.MessageSummary{ID: 1, Subject: "Existing"}).
+		Build()
 	model.inlineSearchActive = true
 	model.searchMode = searchModeFast
 	model.searchInput.SetValue("test query")
-	model.messages = []query.MessageSummary{{ID: 1, Subject: "Existing"}} // Simulate existing results
 
 	// Press Tab to toggle to Deep mode
 	newModel, cmd := model.handleInlineSearchKeys(keyTab())
@@ -1547,15 +1498,10 @@ func TestInlineSearchTabToggleAtMessageList(t *testing.T) {
 
 // TestInlineSearchTabToggleNoQueryNoSearch verifies Tab with empty query doesn't trigger search.
 func TestInlineSearchTabToggleNoQueryNoSearch(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelMessageList
+	model := NewBuilder().WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).Build()
 	model.inlineSearchActive = true
 	model.searchMode = searchModeFast
-	model.loading = false // Explicitly set to false (New() sets it to true)
 	model.searchInput.SetValue("") // Empty query
 
 	// Press Tab to toggle mode
@@ -1580,12 +1526,7 @@ func TestInlineSearchTabToggleNoQueryNoSearch(t *testing.T) {
 
 // TestInlineSearchTabAtAggregateLevel verifies Tab has no effect at aggregate level.
 func TestInlineSearchTabAtAggregateLevel(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates // Not message list
+	model := NewBuilder().WithPageSize(10).WithSize(100, 20).Build()
 	model.inlineSearchActive = true
 	model.searchMode = searchModeFast
 	model.searchInput.SetValue("test query")
@@ -1607,12 +1548,8 @@ func TestInlineSearchTabAtAggregateLevel(t *testing.T) {
 
 // TestInlineSearchTabToggleBackToFast verifies Tab toggles back from Deep to Fast.
 func TestInlineSearchTabToggleBackToFast(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelMessageList
+	model := NewBuilder().WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).Build()
 	model.inlineSearchActive = true
 	model.searchMode = searchModeDeep // Start in Deep mode
 	model.searchInput.SetValue("test query")
@@ -1634,17 +1571,9 @@ func TestInlineSearchTabToggleBackToFast(t *testing.T) {
 
 // TestSpinnerAppearsInViewWhenLoading verifies spinner character appears in rendered view.
 func TestSpinnerAppearsInViewWhenLoading(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "test@example.com", Count: 10},
-		},
-	}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.rows = engine.rows
-	model.loading = false // Start not loading
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "test@example.com", Count: 10}).
+		WithPageSize(10).WithSize(100, 20).Build()
 
 	// Verify no spinner when not loading
 	view1 := model.View()
@@ -1679,12 +1608,8 @@ func TestSpinnerAppearsInViewWhenLoading(t *testing.T) {
 
 // TestSearchBackClears verifies going back clears search state.
 func TestSearchBackClears(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelMessageList
+	model := NewBuilder().WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).Build()
 	model.searchQuery = "test query"
 	model.searchFilter = query.MessageFilter{Sender: "alice@example.com"}
 	model.breadcrumbs = []navigationSnapshot{{state: viewState{level: levelAggregates}}}
@@ -1703,21 +1628,13 @@ func TestSearchBackClears(t *testing.T) {
 
 // TestSearchFromSubAggregate verifies search from sub-aggregate view.
 func TestSearchFromSubAggregate(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "bob@example.com", Count: 3},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelDrillDown
-	model.viewType = query.ViewRecipients
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "bob@example.com", Count: 3}).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelDrillDown).WithViewType(query.ViewRecipients).
+		Build()
 	model.drillViewType = query.ViewSenders
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
-	model.rows = engine.rows
 
 	// Press '/' to activate inline search
 	newModel, cmd := model.handleAggregateKeys(key('/'))
@@ -1733,18 +1650,10 @@ func TestSearchFromSubAggregate(t *testing.T) {
 
 // TestSearchFromMessageList verifies search from message list view.
 func TestSearchFromMessageList(t *testing.T) {
-	engine := &mockEngine{
-		messages: []query.MessageSummary{
-			{ID: 1, Subject: "Test"},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelMessageList
-	model.messages = engine.messages
+	model := NewBuilder().
+		WithMessages(query.MessageSummary{ID: 1, Subject: "Test"}).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).Build()
 
 	// Press '/' to activate inline search
 	newModel, cmd := model.handleMessageListKeys(key('/'))
@@ -1760,19 +1669,10 @@ func TestSearchFromMessageList(t *testing.T) {
 
 // TestGKeyCyclesViewType verifies that 'g' cycles through view types at aggregate level.
 func TestGKeyCyclesViewType(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 10},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "alice@example.com", Count: 10}).
+		WithPageSize(10).WithSize(100, 20).
+		WithViewType(query.ViewSenders).Build()
 	// Set non-zero cursor/scroll to verify reset
 	model.cursor = 5
 	model.scrollOffset = 3
@@ -1803,19 +1703,10 @@ func TestGKeyCyclesViewType(t *testing.T) {
 
 // TestGKeyCyclesViewTypeFullCycle verifies 'g' cycles through all view types.
 func TestGKeyCyclesViewTypeFullCycle(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "test", Count: 10},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "test", Count: 10}).
+		WithPageSize(10).WithSize(100, 20).
+		WithViewType(query.ViewSenders).Build()
 
 	expectedOrder := []query.ViewType{
 		query.ViewRecipients,
@@ -1826,8 +1717,7 @@ func TestGKeyCyclesViewTypeFullCycle(t *testing.T) {
 	}
 
 	for i, expected := range expectedOrder {
-		newModel, _ := model.handleAggregateKeys(key('g'))
-		model = newModel.(Model)
+		model = applyAggregateKey(t, model, key('g'))
 		model.loading = false // Reset for next iteration
 
 		if model.viewType != expected {
@@ -1838,25 +1728,16 @@ func TestGKeyCyclesViewTypeFullCycle(t *testing.T) {
 
 // TestGKeyInSubAggregate verifies 'g' cycles view types in sub-aggregate view.
 func TestGKeyInSubAggregate(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "bob@example.com", Count: 5},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelDrillDown
-	model.viewType = query.ViewRecipients
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "bob@example.com", Count: 5}).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelDrillDown).WithViewType(query.ViewRecipients).
+		Build()
 	model.drillViewType = query.ViewSenders // Drilled from Senders
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
 
 	// Press 'g' - should cycle to next view type, skipping drillViewType
-	newModel, _ := model.handleAggregateKeys(key('g'))
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, key('g'))
 
 	// Should skip ViewSenders (the drillViewType) and go to Domains
 	if m.viewType != query.ViewDomains {
@@ -1867,30 +1748,23 @@ func TestGKeyInSubAggregate(t *testing.T) {
 // TestGKeyInMessageListWithDrillFilter verifies 'g' switches to sub-aggregate view
 // when there's a drill filter.
 func TestGKeyInMessageListWithDrillFilter(t *testing.T) {
-	engine := &mockEngine{
-		messages: []query.MessageSummary{
-			{ID: 1, Subject: "Test 1"},
-			{ID: 2, Subject: "Test 2"},
-			{ID: 3, Subject: "Test 3"},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.messages = engine.messages
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelMessageList
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "Test 1"},
+			query.MessageSummary{ID: 2, Subject: "Test 2"},
+			query.MessageSummary{ID: 3, Subject: "Test 3"},
+		).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).WithViewType(query.ViewSenders).
+		Build()
 	model.cursor = 2 // Start at third item
 	model.scrollOffset = 1
 	// Set up a drill filter so 'g' triggers sub-grouping
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
 	model.drillViewType = query.ViewSenders
-	model.viewType = query.ViewSenders
 
 	// Press 'g' - should switch to sub-aggregate view
-	newModel, _ := model.handleMessageListKeys(key('g'))
-	m := newModel.(Model)
+	m := applyMessageListKey(t, model, key('g'))
 
 	if m.level != levelDrillDown {
 		t.Errorf("expected level=levelDrillDown after 'g' with drill filter, got %v", m.level)
@@ -1903,27 +1777,20 @@ func TestGKeyInMessageListWithDrillFilter(t *testing.T) {
 
 // TestGKeyInMessageListNoDrillFilter verifies 'g' goes back to aggregates when no drill filter.
 func TestGKeyInMessageListNoDrillFilter(t *testing.T) {
-	engine := &mockEngine{
-		messages: []query.MessageSummary{
-			{ID: 1, Subject: "Test 1"},
-			{ID: 2, Subject: "Test 2"},
-			{ID: 3, Subject: "Test 3"},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.messages = engine.messages
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelMessageList
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "Test 1"},
+			query.MessageSummary{ID: 2, Subject: "Test 2"},
+			query.MessageSummary{ID: 3, Subject: "Test 3"},
+		).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).Build()
 	model.cursor = 2 // Start at third item
 	model.scrollOffset = 1
 	// No drill filter - 'g' should go back to aggregates
 
 	// Press 'g' - should go back to aggregate view
-	newModel, _ := model.handleMessageListKeys(key('g'))
-	m := newModel.(Model)
+	m := applyMessageListKey(t, model, key('g'))
 
 	// Should transition to aggregate level
 	if m.level != levelAggregates {
@@ -2010,19 +1877,14 @@ func TestStatsUpdateOnDrillDown(t *testing.T) {
 
 // TestPositionDisplayInMessageList verifies position shows cursor/total correctly.
 func TestPositionDisplayInMessageList(t *testing.T) {
-	engine := &mockEngine{
-		messages: make([]query.MessageSummary, 100),
-	}
+	msgs := make([]query.MessageSummary, 100)
 	for i := 0; i < 100; i++ {
-		engine.messages[i] = query.MessageSummary{ID: int64(i + 1), Subject: fmt.Sprintf("Test %d", i+1)}
+		msgs[i] = query.MessageSummary{ID: int64(i + 1), Subject: fmt.Sprintf("Test %d", i+1)}
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.messages = engine.messages
-	model.pageSize = 20
-	model.width = 100
-	model.height = 30
-	model.level = levelMessageList
+	model := NewBuilder().WithMessages(msgs...).
+		WithPageSize(20).WithSize(100, 30).
+		WithLevel(levelMessageList).Build()
 	model.cursor = 49 // 50th message
 
 	// Get the footer view
@@ -2036,19 +1898,10 @@ func TestPositionDisplayInMessageList(t *testing.T) {
 
 // TestTabCyclesViewTypeAtAggregates verifies Tab still cycles view types.
 func TestTabCyclesViewTypeAtAggregates(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "test", Count: 10},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "test", Count: 10}).
+		WithPageSize(10).WithSize(100, 20).
+		WithViewType(query.ViewSenders).Build()
 	// Set non-zero cursor/scroll to verify reset
 	model.cursor = 5
 	model.scrollOffset = 3
@@ -2074,26 +1927,18 @@ func TestTabCyclesViewTypeAtAggregates(t *testing.T) {
 
 // TestHomeKeyGoesToTop verifies 'home' key goes to top (separate from 'g').
 func TestHomeKeyGoesToTop(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "a", Count: 1},
-			{Key: "b", Count: 2},
-			{Key: "c", Count: 3},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates
+	model := NewBuilder().
+		WithRows(
+			query.AggregateRow{Key: "a", Count: 1},
+			query.AggregateRow{Key: "b", Count: 2},
+			query.AggregateRow{Key: "c", Count: 3},
+		).
+		WithPageSize(10).WithSize(100, 20).Build()
 	model.cursor = 2
 	model.scrollOffset = 1
 
 	// Press 'home' - should go to top
-	newModel, _ := model.handleAggregateKeys(keyHome())
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, keyHome())
 
 	if m.cursor != 0 {
 		t.Errorf("expected cursor=0 after 'home', got %d", m.cursor)
@@ -2147,26 +1992,14 @@ func TestContextStatsSetOnDrillDown(t *testing.T) {
 
 // TestContextStatsClearedOnGoBack verifies contextStats is cleared when going back to aggregates.
 func TestContextStatsClearedOnGoBack(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-		},
-		messages: []query.MessageSummary{
-			{ID: 1, Subject: "Test"},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "alice@example.com", Count: 100, TotalSize: 500000}).
+		WithMessages(query.MessageSummary{ID: 1, Subject: "Test"}).
+		WithPageSize(10).WithSize(100, 20).
+		WithViewType(query.ViewSenders).Build()
 
 	// Drill down
-	newModel, _ := model.handleAggregateKeys(keyEnter())
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, keyEnter())
 
 	if m.contextStats == nil {
 		t.Fatal("expected contextStats to be set after drill-down")
@@ -2184,40 +2017,30 @@ func TestContextStatsClearedOnGoBack(t *testing.T) {
 
 // TestContextStatsRestoredOnGoBackToSubAggregate verifies contextStats is restored when going back.
 func TestContextStatsRestoredOnGoBackToSubAggregate(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-			{Key: "bob@example.com", Count: 50, TotalSize: 250000},
-		},
-		messages: []query.MessageSummary{
-			{ID: 1, Subject: "Test"},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
+	msgs := []query.MessageSummary{{ID: 1, Subject: "Test"}}
+	model := NewBuilder().
+		WithRows(
+			query.AggregateRow{Key: "alice@example.com", Count: 100, TotalSize: 500000},
+			query.AggregateRow{Key: "bob@example.com", Count: 50, TotalSize: 250000},
+		).
+		WithMessages(msgs...).
+		WithPageSize(10).WithSize(100, 20).
+		WithViewType(query.ViewSenders).Build()
 
 	// Step 1: Drill down to message list (sets contextStats from alice's row)
-	newModel, _ := model.handleAggregateKeys(keyEnter())
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, keyEnter())
 	if m.contextStats == nil || m.contextStats.MessageCount != 100 {
 		t.Fatalf("expected contextStats.MessageCount=100, got %v", m.contextStats)
 	}
 
 	// Simulate messages loaded and transition to message list level
 	m.level = levelMessageList
-	m.messages = engine.messages
+	m.messages = msgs
 	m.filterKey = "alice@example.com"
 	originalContextStats := m.contextStats
 
 	// Step 2: Press Tab to go to sub-aggregate view (contextStats saved in breadcrumb)
-	newModel2, _ := m.handleMessageListKeys(keyTab())
-	m2 := newModel2.(Model)
+	m2 := applyMessageListKey(t, m, keyTab())
 	// Simulate data load completing with sub-aggregate rows
 	m2.rows = []query.AggregateRow{
 		{Key: "domain1.com", Count: 60, TotalSize: 300000},
@@ -2233,8 +2056,7 @@ func TestContextStatsRestoredOnGoBackToSubAggregate(t *testing.T) {
 	}
 
 	// Step 3: Drill down from sub-aggregate to message list (contextStats overwritten)
-	newModel3, _ := m2.handleAggregateKeys(keyEnter())
-	m3 := newModel3.(Model)
+	m3 := applyAggregateKey(t, m2, keyEnter())
 	if m3.level != levelMessageList {
 		t.Fatalf("expected levelMessageList after Enter, got %v", m3.level)
 	}
@@ -2259,14 +2081,10 @@ func TestContextStatsRestoredOnGoBackToSubAggregate(t *testing.T) {
 
 // TestContextStatsDisplayedInHeader verifies header shows contextual stats when drilled down.
 func TestContextStatsDisplayedInHeader(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.width = 100
-	model.height = 20
-	model.level = levelMessageList
-	model.stats = &query.TotalStats{MessageCount: 10000, TotalSize: 50000000, AttachmentCount: 500}
-	model.contextStats = &query.TotalStats{MessageCount: 100, TotalSize: 500000}
+	model := NewBuilder().WithSize(100, 20).WithLevel(levelMessageList).
+		WithStats(&query.TotalStats{MessageCount: 10000, TotalSize: 50000000, AttachmentCount: 500}).
+		WithContextStats(&query.TotalStats{MessageCount: 100, TotalSize: 500000}).
+		Build()
 
 	header := model.headerView()
 
@@ -2281,15 +2099,10 @@ func TestContextStatsDisplayedInHeader(t *testing.T) {
 
 // TestContextStatsShowsAttachmentCountInHeader verifies header shows attachment count when drilled down.
 func TestContextStatsShowsAttachmentCountInHeader(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.width = 120
-	model.height = 20
-	model.level = levelMessageList
-	model.stats = &query.TotalStats{MessageCount: 10000, TotalSize: 50000000, AttachmentCount: 500}
-	// contextStats with attachment count
-	model.contextStats = &query.TotalStats{MessageCount: 100, TotalSize: 500000, AttachmentCount: 42}
+	model := NewBuilder().WithSize(120, 20).WithLevel(levelMessageList).
+		WithStats(&query.TotalStats{MessageCount: 10000, TotalSize: 50000000, AttachmentCount: 500}).
+		WithContextStats(&query.TotalStats{MessageCount: 100, TotalSize: 500000, AttachmentCount: 42}).
+		Build()
 
 	header := model.headerView()
 
@@ -2304,15 +2117,10 @@ func TestContextStatsShowsAttachmentCountInHeader(t *testing.T) {
 
 // TestContextStatsShowsZeroAttachmentCount verifies header shows "0 attchs" when count is 0.
 func TestContextStatsShowsZeroAttachmentCount(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.width = 120
-	model.height = 20
-	model.level = levelMessageList
-	model.stats = &query.TotalStats{MessageCount: 10000, TotalSize: 50000000, AttachmentCount: 500}
-	// contextStats with zero attachment count
-	model.contextStats = &query.TotalStats{MessageCount: 100, TotalSize: 500000, AttachmentCount: 0}
+	model := NewBuilder().WithSize(120, 20).WithLevel(levelMessageList).
+		WithStats(&query.TotalStats{MessageCount: 10000, TotalSize: 50000000, AttachmentCount: 500}).
+		WithContextStats(&query.TotalStats{MessageCount: 100, TotalSize: 500000, AttachmentCount: 0}).
+		Build()
 
 	header := model.headerView()
 
@@ -2324,22 +2132,18 @@ func TestContextStatsShowsZeroAttachmentCount(t *testing.T) {
 
 // TestPositionShowsTotalFromContextStats verifies footer shows "N of M" when total > loaded.
 func TestPositionShowsTotalFromContextStats(t *testing.T) {
-	engine := &mockEngine{}
-
 	// Create 100 loaded messages but contextStats says 500 total
 	messages := make([]query.MessageSummary, 100)
 	for i := range messages {
 		messages[i] = query.MessageSummary{ID: int64(i + 1), Subject: fmt.Sprintf("Msg %d", i+1)}
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.messages = messages
-	model.pageSize = 20
-	model.width = 100
-	model.height = 30
-	model.level = levelMessageList
-	model.cursor = 49                                         // 50th message
-	model.contextStats = &query.TotalStats{MessageCount: 500} // 500 total in group
+	model := NewBuilder().WithMessages(messages...).
+		WithPageSize(20).WithSize(100, 30).
+		WithLevel(levelMessageList).
+		WithContextStats(&query.TotalStats{MessageCount: 500}).
+		Build()
+	model.cursor = 49 // 50th message
 
 	footer := model.footerView()
 
@@ -2354,21 +2158,17 @@ func TestPositionShowsTotalFromContextStats(t *testing.T) {
 
 // TestPositionShowsLoadedCountWhenAllLoaded verifies footer shows "N/M" when all loaded.
 func TestPositionShowsLoadedCountWhenAllLoaded(t *testing.T) {
-	engine := &mockEngine{}
-
 	messages := make([]query.MessageSummary, 50)
 	for i := range messages {
 		messages[i] = query.MessageSummary{ID: int64(i + 1)}
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.messages = messages
-	model.pageSize = 20
-	model.width = 100
-	model.height = 30
-	model.level = levelMessageList
+	model := NewBuilder().WithMessages(messages...).
+		WithPageSize(20).WithSize(100, 30).
+		WithLevel(levelMessageList).
+		WithContextStats(&query.TotalStats{MessageCount: 50}).
+		Build()
 	model.cursor = 24
-	model.contextStats = &query.TotalStats{MessageCount: 50} // Same as loaded
 
 	footer := model.footerView()
 
@@ -2380,21 +2180,15 @@ func TestPositionShowsLoadedCountWhenAllLoaded(t *testing.T) {
 
 // TestPositionShowsLoadedCountWhenNoContextStats verifies footer falls back to loaded count.
 func TestPositionShowsLoadedCountWhenNoContextStats(t *testing.T) {
-	engine := &mockEngine{}
-
 	messages := make([]query.MessageSummary, 75)
 	for i := range messages {
 		messages[i] = query.MessageSummary{ID: int64(i + 1)}
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.messages = messages
-	model.pageSize = 20
-	model.width = 100
-	model.height = 30
-	model.level = levelMessageList
+	model := NewBuilder().WithMessages(messages...).
+		WithPageSize(20).WithSize(100, 30).
+		WithLevel(levelMessageList).Build()
 	model.cursor = 49
-	model.contextStats = nil // No context stats (e.g., "All Messages" view)
 
 	footer := model.footerView()
 
@@ -2411,22 +2205,17 @@ func TestPositionShowsLoadedCountWhenNoContextStats(t *testing.T) {
 // TestPositionShowsLoadedCountWhenContextStatsSmaller verifies loaded count is used when
 // contextStats.MessageCount is smaller than loaded (edge case, shouldn't normally happen).
 func TestPositionShowsLoadedCountWhenContextStatsSmaller(t *testing.T) {
-	engine := &mockEngine{}
-
 	messages := make([]query.MessageSummary, 100)
 	for i := range messages {
 		messages[i] = query.MessageSummary{ID: int64(i + 1)}
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.messages = messages
-	model.pageSize = 20
-	model.width = 100
-	model.height = 30
-	model.level = levelMessageList
+	model := NewBuilder().WithMessages(messages...).
+		WithPageSize(20).WithSize(100, 30).
+		WithLevel(levelMessageList).
+		WithContextStats(&query.TotalStats{MessageCount: 50}).
+		Build()
 	model.cursor = 49
-	// contextStats says 50, but we have 100 loaded (stale/inconsistent state)
-	model.contextStats = &query.TotalStats{MessageCount: 50}
 
 	footer := model.footerView()
 
@@ -2440,24 +2229,19 @@ func TestPositionShowsLoadedCountWhenContextStatsSmaller(t *testing.T) {
 // TestPositionUsesGlobalStatsForAllMessagesView verifies footer uses global stats
 // when in "All Messages" view (allMessages=true, contextStats=nil).
 func TestPositionUsesGlobalStatsForAllMessagesView(t *testing.T) {
-	engine := &mockEngine{}
-
 	// Simulate 500 messages loaded (the limit)
 	messages := make([]query.MessageSummary, 500)
 	for i := range messages {
 		messages[i] = query.MessageSummary{ID: int64(i + 1)}
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.messages = messages
-	model.pageSize = 20
-	model.width = 100
-	model.height = 30
-	model.level = levelMessageList
-	model.cursor = 99 // 100th message
-	model.allMessages = true                                      // All Messages view
-	model.contextStats = nil                                      // No drill-down context
-	model.stats = &query.TotalStats{MessageCount: 175000}         // Global total is much larger
+	model := NewBuilder().WithMessages(messages...).
+		WithPageSize(20).WithSize(100, 30).
+		WithLevel(levelMessageList).
+		WithStats(&query.TotalStats{MessageCount: 175000}).
+		Build()
+	model.cursor = 99        // 100th message
+	model.allMessages = true  // All Messages view
 
 	footer := model.footerView()
 
@@ -2473,10 +2257,7 @@ func TestPositionUsesGlobalStatsForAllMessagesView(t *testing.T) {
 
 // TestHelpModalOpensWithQuestionMark verifies '?' opens the help modal.
 func TestHelpModalOpensWithQuestionMark(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelAggregates
-	model.modal = modalNone
+	model := NewBuilder().Build()
 
 	// Press '?'
 	newModel, _ := model.Update(key('?'))
@@ -2489,10 +2270,7 @@ func TestHelpModalOpensWithQuestionMark(t *testing.T) {
 
 // TestHelpModalClosesOnAnyKey verifies help modal closes on any key.
 func TestHelpModalClosesOnAnyKey(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelAggregates
-	model.modal = modalHelp
+	model := NewBuilder().WithModal(modalHelp).Build()
 
 	// Press any key (e.g., Enter)
 	newModel, _ := model.Update(keyEnter())
@@ -2505,11 +2283,8 @@ func TestHelpModalClosesOnAnyKey(t *testing.T) {
 
 // TestVKeyReversesSortOrder verifies 'v' reverses sort direction.
 func TestVKeyReversesSortOrder(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelAggregates
+	model := NewBuilder().WithRows(query.AggregateRow{Key: "test", Count: 1}).Build()
 	model.sortDirection = query.SortDesc
-	model.rows = []query.AggregateRow{{Key: "test", Count: 1}}
 
 	// Press 'v'
 	newModel, _ := model.Update(key('v'))
@@ -2530,9 +2305,7 @@ func TestVKeyReversesSortOrder(t *testing.T) {
 
 // TestSearchSetsContextStats verifies search results set contextStats for header metrics.
 func TestSearchSetsContextStats(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelAggregates
+	model := NewBuilder().Build()
 	model.searchRequestID = 1
 
 	// Simulate receiving search results
@@ -2556,12 +2329,10 @@ func TestSearchSetsContextStats(t *testing.T) {
 
 // TestSearchZeroResultsClearsContextStats verifies contextStats is set to zero on empty search.
 func TestSearchZeroResultsClearsContextStats(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelAggregates
+	model := NewBuilder().
+		WithContextStats(&query.TotalStats{MessageCount: 500}).
+		Build()
 	model.searchRequestID = 1
-	// Set stale contextStats from previous view
-	model.contextStats = &query.TotalStats{MessageCount: 500}
 
 	// Simulate receiving zero search results
 	msg := searchResultsMsg{
@@ -2584,13 +2355,13 @@ func TestSearchZeroResultsClearsContextStats(t *testing.T) {
 
 // TestSearchPaginationUpdatesContextStats verifies contextStats updates on append when total unknown.
 func TestSearchPaginationUpdatesContextStats(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageList
+	model := NewBuilder().
+		WithMessages(make([]query.MessageSummary, 50)...).
+		WithLevel(levelMessageList).
+		WithContextStats(&query.TotalStats{MessageCount: 50}).
+		Build()
 	model.searchRequestID = 1
 	model.searchTotalCount = -1 // Unknown total
-	model.messages = make([]query.MessageSummary, 50)
-	model.contextStats = &query.TotalStats{MessageCount: 50}
 
 	// Simulate receiving additional paginated results
 	msg := searchResultsMsg{
@@ -2627,8 +2398,7 @@ func TestSearchResultsPreservesDrillDownContextStats(t *testing.T) {
 	model.cursor = 0 // alice@example.com: Count=100, TotalSize=1000, AttachmentCount=5
 
 	// Press Enter to drill down (sets contextStats from selected row)
-	newModel, _ := model.handleAggregateKeys(keyEnter())
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, keyEnter())
 
 	// Verify contextStats was set from selected row with full stats
 	if m.contextStats == nil {
@@ -2907,15 +2677,11 @@ func TestSubAggregateDrillDownWithSearchQuery(t *testing.T) {
 // TestViewTypeRestoredAfterEscFromSubAggregate verifies viewType is restored when
 // navigating back from sub-aggregate to message list.
 func TestViewTypeRestoredAfterEscFromSubAggregate(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up message list state with ViewSenders
-	model.level = levelMessageList
-	model.viewType = query.ViewSenders
+	model := NewBuilder().
+		WithMessages(query.MessageSummary{ID: 1}, query.MessageSummary{ID: 2}).
+		WithLevel(levelMessageList).WithViewType(query.ViewSenders).Build()
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
 	model.drillViewType = query.ViewSenders
-	model.messages = []query.MessageSummary{{ID: 1}, {ID: 2}}
 	model.cursor = 1
 	model.scrollOffset = 0
 
@@ -2948,18 +2714,13 @@ func TestViewTypeRestoredAfterEscFromSubAggregate(t *testing.T) {
 // when navigating back. With view caching, data is restored from cache instantly
 // without requiring a reload.
 func TestCursorScrollPreservedAfterGoBack(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up aggregate view with cursor at row 5
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
+	rows := make([]query.AggregateRow, 10)
+	for i := range rows {
+		rows[i] = query.AggregateRow{Key: fmt.Sprintf("sender%d@example.com", i), Count: int64(i)}
+	}
+	model := NewBuilder().WithRows(rows...).WithViewType(query.ViewSenders).Build()
 	model.cursor = 5
 	model.scrollOffset = 3
-	model.rows = make([]query.AggregateRow, 10)
-	for i := range model.rows {
-		model.rows[i] = query.AggregateRow{Key: fmt.Sprintf("sender%d@example.com", i), Count: int64(i)}
-	}
 
 	// Drill down to message list (saves breadcrumb with cached rows)
 	newModel, _ := model.Update(keyEnter())
@@ -3007,11 +2768,7 @@ func TestCursorScrollPreservedAfterGoBack(t *testing.T) {
 
 // TestGoBackClearsError verifies that goBack clears any stale error.
 func TestGoBackClearsError(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up with a breadcrumb and an error
-	model.level = levelMessageList
+	model := NewBuilder().WithLevel(levelMessageList).Build()
 	model.err = fmt.Errorf("some previous error")
 	model.breadcrumbs = []navigationSnapshot{{state: viewState{
 		level:    levelAggregates,
@@ -3031,24 +2788,18 @@ func TestGoBackClearsError(t *testing.T) {
 // TestDrillFilterPreservedAfterMessageDetail verifies drillFilter is preserved
 // when navigating back from message detail to message list.
 func TestDrillFilterPreservedAfterMessageDetail(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up message list with drill filter (sender + recipient combined)
-	model.level = levelMessageList
-	model.viewType = query.ViewRecipients
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "Test message"},
+			query.MessageSummary{ID: 2, Subject: "Another message"},
+		).
+		WithLevel(levelMessageList).WithViewType(query.ViewRecipients).Build()
 	model.drillFilter = query.MessageFilter{
 		Sender:    "alice@example.com",
 		Recipient: "bob@example.com",
 	}
 	model.drillViewType = query.ViewSenders
 	model.filterKey = "bob@example.com"
-	model.allMessages = false
-	model.messages = []query.MessageSummary{
-		{ID: 1, Subject: "Test message"},
-		{ID: 2, Subject: "Another message"},
-	}
-	model.cursor = 0
 
 	// Press Enter to go to message detail
 	newModel, _ := model.Update(keyEnter())
@@ -3100,12 +2851,8 @@ func TestDrillFilterPreservedAfterMessageDetail(t *testing.T) {
 
 // TestHeaderShowsTitleBar verifies the title bar shows msgvault with version.
 func TestHeaderShowsTitleBar(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234567890"})
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
+	model := NewBuilder().WithSize(100, 20).WithViewType(query.ViewSenders).Build()
+	model.version = "abc1234567890"
 
 	header := model.headerView()
 	lines := strings.Split(header, "\n")
@@ -3128,17 +2875,13 @@ func TestHeaderShowsTitleBar(t *testing.T) {
 
 // TestHeaderShowsSelectedAccount verifies header shows selected account name.
 func TestHeaderShowsSelectedAccount(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates
-	model.accounts = []query.AccountInfo{
-		{ID: 1, Identifier: "alice@gmail.com"},
-		{ID: 2, Identifier: "bob@gmail.com"},
-	}
 	accountID := int64(2)
-	model.accountFilter = &accountID
+	model := NewBuilder().WithSize(100, 20).
+		WithAccounts(
+			query.AccountInfo{ID: 1, Identifier: "alice@gmail.com"},
+			query.AccountInfo{ID: 2, Identifier: "bob@gmail.com"},
+		).
+		WithAccountFilter(&accountID).Build()
 
 	header := model.headerView()
 	lines := strings.Split(header, "\n")
@@ -3150,13 +2893,9 @@ func TestHeaderShowsSelectedAccount(t *testing.T) {
 
 // TestHeaderShowsViewTypeOnLine2 verifies line 2 shows current view type.
 func TestHeaderShowsViewTypeOnLine2(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
+	model := NewBuilder().WithSize(100, 20).WithViewType(query.ViewSenders).
+		WithStats(&query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}).
+		Build()
 
 	header := model.headerView()
 	lines := strings.Split(header, "\n")
@@ -3176,12 +2915,8 @@ func TestHeaderShowsViewTypeOnLine2(t *testing.T) {
 
 // TestHeaderDrillDownUsesPrefix verifies drill-down uses compact prefix (S: instead of From:).
 func TestHeaderDrillDownUsesPrefix(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.width = 100
-	model.height = 20
-	model.level = levelMessageList
-	model.viewType = query.ViewRecipients
+	model := NewBuilder().WithSize(100, 20).
+		WithLevel(levelMessageList).WithViewType(query.ViewRecipients).Build()
 	model.drillViewType = query.ViewSenders
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
 	model.filterKey = "alice@example.com"
@@ -3204,15 +2939,12 @@ func TestHeaderDrillDownUsesPrefix(t *testing.T) {
 
 // TestHeaderSubAggregateShowsDrillContext verifies sub-aggregate shows drill context.
 func TestHeaderSubAggregateShowsDrillContext(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.width = 100
-	model.height = 20
-	model.level = levelDrillDown
-	model.viewType = query.ViewRecipients
+	model := NewBuilder().WithSize(100, 20).
+		WithLevel(levelDrillDown).WithViewType(query.ViewRecipients).
+		WithContextStats(&query.TotalStats{MessageCount: 100, TotalSize: 500000}).
+		Build()
 	model.drillViewType = query.ViewSenders
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
-	model.contextStats = &query.TotalStats{MessageCount: 100, TotalSize: 500000}
 
 	header := model.headerView()
 	lines := strings.Split(header, "\n")
@@ -3239,11 +2971,7 @@ func TestHeaderSubAggregateShowsDrillContext(t *testing.T) {
 
 // TestHeaderWithAttachmentFilter verifies header shows attachment filter indicator.
 func TestHeaderWithAttachmentFilter(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.width = 100
-	model.height = 20
-	model.level = levelAggregates
+	model := NewBuilder().WithSize(100, 20).Build()
 	model.attachmentFilter = true
 
 	header := model.headerView()
@@ -3256,20 +2984,17 @@ func TestHeaderWithAttachmentFilter(t *testing.T) {
 
 // TestViewStructureHasTitleBarFirst verifies View() output starts with title bar.
 func TestViewStructureHasTitleBarFirst(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 100, TotalSize: 500000},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.width = 100
-	model.height = 30
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.pageSize = 20
-	model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
+	model := NewBuilder().
+		WithRows(rows...).
+		WithViewType(query.ViewSenders).
+		WithSize(100, 30).
+		WithPageSize(20).
+		WithStats(&query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}).
+		Build()
 
 	view := model.View()
 	lines := strings.Split(view, "\n")
@@ -3301,41 +3026,31 @@ func TestViewStructureHasTitleBarFirst(t *testing.T) {
 // when pageSize is calculated via WindowSizeMsg. This catches bugs where header
 // line count changes but pageSize calculation isn't updated.
 func TestViewFitsTerminalHeight(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-			{Key: "bob@example.com", Count: 50, TotalSize: 250000},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 100, TotalSize: 500000},
+		{Key: "bob@example.com", Count: 50, TotalSize: 250000},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
+	model := NewBuilder().
+		WithRows(rows...).
+		WithViewType(query.ViewSenders).
+		WithStats(&query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}).
+		Build()
 
 	// Simulate WindowSizeMsg to trigger pageSize calculation (the real code path)
 	terminalHeight := 40
-	newModel, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: terminalHeight})
-	model = newModel.(Model)
+	model = resizeModel(t, model, 100, terminalHeight)
 
 	view := model.View()
 	lines := strings.Split(view, "\n")
-
-	// The last "line" after split is empty due to trailing newline, so subtract 1
-	actualLines := len(lines)
-	if lines[len(lines)-1] == "" {
-		actualLines--
-	}
+	actualLines := countViewLines(view)
 
 	t.Logf("Terminal height: %d, View lines: %d, pageSize: %d", terminalHeight, actualLines, model.pageSize)
 	t.Logf("First line: %q", lines[0])
 	t.Logf("Last non-empty line: %q", lines[actualLines-1])
 
 	// View should fit exactly in terminal height
-	if actualLines > terminalHeight {
-		t.Errorf("View has %d lines but terminal height is %d - title bar will be pushed off!", actualLines, terminalHeight)
-	}
+	assertViewFitsHeight(t, view, terminalHeight)
 
 	// First line must be title bar
 	if !strings.Contains(lines[0], "msgvault") {
@@ -3345,37 +3060,28 @@ func TestViewFitsTerminalHeight(t *testing.T) {
 
 // TestViewFitsTerminalHeightDuringLoading verifies View() output fits during loading state.
 func TestViewFitsTerminalHeightDuringLoading(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-			{Key: "bob@example.com", Count: 50, TotalSize: 250000},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 100, TotalSize: 500000},
+		{Key: "bob@example.com", Count: 50, TotalSize: 250000},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
-	model.loading = true // Key difference: loading state
+	model := NewBuilder().
+		WithRows(rows...).
+		WithViewType(query.ViewSenders).
+		WithStats(&query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}).
+		WithLoading(true).
+		Build()
 
 	terminalHeight := 40
-	newModel, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: terminalHeight})
-	model = newModel.(Model)
+	model = resizeModel(t, model, 100, terminalHeight)
 
 	view := model.View()
 	lines := strings.Split(view, "\n")
-
-	actualLines := len(lines)
-	if lines[len(lines)-1] == "" {
-		actualLines--
-	}
+	actualLines := countViewLines(view)
 
 	t.Logf("Terminal height: %d, View lines: %d, pageSize: %d (loading=%v)", terminalHeight, actualLines, model.pageSize, model.loading)
 
-	if actualLines > terminalHeight {
-		t.Errorf("View has %d lines but terminal height is %d during loading", actualLines, terminalHeight)
-	}
+	assertViewFitsHeight(t, view, terminalHeight)
 	if !strings.Contains(lines[0], "msgvault") {
 		t.Errorf("First line should be title bar, got: %q", lines[0])
 	}
@@ -3383,37 +3089,28 @@ func TestViewFitsTerminalHeightDuringLoading(t *testing.T) {
 
 // TestViewFitsTerminalHeightWithInlineSearch verifies View() output fits with inline search active.
 func TestViewFitsTerminalHeightWithInlineSearch(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-			{Key: "bob@example.com", Count: 50, TotalSize: 250000},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 100, TotalSize: 500000},
+		{Key: "bob@example.com", Count: 50, TotalSize: 250000},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
+	model := NewBuilder().
+		WithRows(rows...).
+		WithViewType(query.ViewSenders).
+		WithStats(&query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}).
+		Build()
 	model.inlineSearchActive = true // Enable inline search
 
 	terminalHeight := 40
-	newModel, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: terminalHeight})
-	model = newModel.(Model)
+	model = resizeModel(t, model, 100, terminalHeight)
 
 	view := model.View()
 	lines := strings.Split(view, "\n")
-
-	actualLines := len(lines)
-	if lines[len(lines)-1] == "" {
-		actualLines--
-	}
+	actualLines := countViewLines(view)
 
 	t.Logf("Terminal height: %d, View lines: %d, pageSize: %d (inlineSearch=%v)", terminalHeight, actualLines, model.pageSize, model.inlineSearchActive)
 
-	if actualLines > terminalHeight {
-		t.Errorf("View has %d lines but terminal height is %d with inline search", actualLines, terminalHeight)
-	}
+	assertViewFitsHeight(t, view, terminalHeight)
 	if !strings.Contains(lines[0], "msgvault") {
 		t.Errorf("First line should be title bar, got: %q", lines[0])
 	}
@@ -3421,37 +3118,29 @@ func TestViewFitsTerminalHeightWithInlineSearch(t *testing.T) {
 
 // TestViewFitsTerminalHeightAtMessageList verifies View() output fits at message list level.
 func TestViewFitsTerminalHeightAtMessageList(t *testing.T) {
-	engine := &mockEngine{
-		messages: []query.MessageSummary{
-			{ID: 1, Subject: "Test 1", FromEmail: "alice@example.com", SizeEstimate: 1000},
-			{ID: 2, Subject: "Test 2", FromEmail: "bob@example.com", SizeEstimate: 2000},
-		},
+	msgs := []query.MessageSummary{
+		{ID: 1, Subject: "Test 1", FromEmail: "alice@example.com", SizeEstimate: 1000},
+		{ID: 2, Subject: "Test 2", FromEmail: "bob@example.com", SizeEstimate: 2000},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.level = levelMessageList
-	model.messages = engine.messages
+	model := NewBuilder().
+		WithMessages(msgs...).
+		WithLevel(levelMessageList).
+		WithStats(&query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}).
+		WithContextStats(&query.TotalStats{MessageCount: 2, TotalSize: 3000, AttachmentCount: 0}).
+		Build()
 	model.filterKey = "alice@example.com"
-	model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
-	model.contextStats = &query.TotalStats{MessageCount: 2, TotalSize: 3000, AttachmentCount: 0}
 
 	terminalHeight := 40
-	newModel, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: terminalHeight})
-	model = newModel.(Model)
+	model = resizeModel(t, model, 100, terminalHeight)
 
 	view := model.View()
 	lines := strings.Split(view, "\n")
-
-	actualLines := len(lines)
-	if lines[len(lines)-1] == "" {
-		actualLines--
-	}
+	actualLines := countViewLines(view)
 
 	t.Logf("Terminal height: %d, View lines: %d, pageSize: %d (level=MessageList)", terminalHeight, actualLines, model.pageSize)
 
-	if actualLines > terminalHeight {
-		t.Errorf("View has %d lines but terminal height is %d at message list", actualLines, terminalHeight)
-	}
+	assertViewFitsHeight(t, view, terminalHeight)
 	if !strings.Contains(lines[0], "msgvault") {
 		t.Errorf("First line should be title bar, got: %q", lines[0])
 	}
@@ -3464,9 +3153,10 @@ func TestViewFitsTerminalHeightStartupSequence(t *testing.T) {
 	terminalWidth := 100
 
 	// Stage 1: Before WindowSizeMsg (width=0)
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.loading = true
+	model := NewBuilder().
+		WithLoading(true).
+		WithSize(0, 0).
+		Build()
 
 	view1 := model.View()
 	t.Logf("Stage 1 (before resize): View = %q", view1)
@@ -3475,15 +3165,11 @@ func TestViewFitsTerminalHeightStartupSequence(t *testing.T) {
 	}
 
 	// Stage 2: After WindowSizeMsg (width/height set, loading=true, no data)
-	newModel, _ := model.Update(tea.WindowSizeMsg{Width: terminalWidth, Height: terminalHeight})
-	model = newModel.(Model)
+	model = resizeModel(t, model, terminalWidth, terminalHeight)
 
 	view2 := model.View()
 	lines2 := strings.Split(view2, "\n")
-	actualLines2 := len(lines2)
-	if lines2[len(lines2)-1] == "" {
-		actualLines2--
-	}
+	actualLines2 := countViewLines(view2)
 	t.Logf("Stage 2 (after resize, loading=true, no data): lines=%d, pageSize=%d", actualLines2, model.pageSize)
 	t.Logf("  First line: %q", truncateTestString(lines2[0], 60))
 	t.Logf("  Last line: %q", truncateTestString(lines2[actualLines2-1], 60))
@@ -3496,11 +3182,7 @@ func TestViewFitsTerminalHeightStartupSequence(t *testing.T) {
 	model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
 
 	view3 := model.View()
-	lines3 := strings.Split(view3, "\n")
-	actualLines3 := len(lines3)
-	if lines3[len(lines3)-1] == "" {
-		actualLines3--
-	}
+	actualLines3 := countViewLines(view3)
 	t.Logf("Stage 3 (stats loaded, loading=true): lines=%d", actualLines3)
 
 	if actualLines3 != terminalHeight {
@@ -3516,10 +3198,7 @@ func TestViewFitsTerminalHeightStartupSequence(t *testing.T) {
 
 	view4 := model.View()
 	lines4 := strings.Split(view4, "\n")
-	actualLines4 := len(lines4)
-	if lines4[len(lines4)-1] == "" {
-		actualLines4--
-	}
+	actualLines4 := countViewLines(view4)
 	t.Logf("Stage 4 (data loaded): lines=%d", actualLines4)
 	t.Logf("  First line: %q", truncateTestString(lines4[0], 60))
 
@@ -3528,7 +3207,7 @@ func TestViewFitsTerminalHeightStartupSequence(t *testing.T) {
 	}
 
 	// Ensure first line is always title bar at stages 2-4
-	for i, lines := range [][]string{lines2, lines3, lines4} {
+	for i, lines := range [][]string{lines2, strings.Split(view3, "\n"), lines4} {
 		if !strings.Contains(lines[0], "msgvault") {
 			t.Errorf("Stage %d: First line should contain 'msgvault', got: %q", i+2, lines[0])
 		}
@@ -3547,32 +3226,25 @@ func truncateTestString(s string, max int) string {
 // embedded newlines or other problematic characters without adding extra lines.
 func TestViewFitsTerminalHeightWithBadData(t *testing.T) {
 	// Data with embedded newlines and other special characters
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-			{Key: "bob\n@example.com", Count: 50, TotalSize: 250000}, // Embedded newline!
-			{Key: "charlie\r\n@example.com", Count: 25, TotalSize: 100000}, // CRLF
-			{Key: "david\t@example.com", Count: 10, TotalSize: 50000}, // Tab
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 100, TotalSize: 500000},
+		{Key: "bob\n@example.com", Count: 50, TotalSize: 250000}, // Embedded newline!
+		{Key: "charlie\r\n@example.com", Count: 25, TotalSize: 100000}, // CRLF
+		{Key: "david\t@example.com", Count: 10, TotalSize: 50000}, // Tab
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
+	model := NewBuilder().
+		WithRows(rows...).
+		WithViewType(query.ViewSenders).
+		WithStats(&query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}).
+		Build()
 
 	terminalHeight := 40
-	newModel, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: terminalHeight})
-	model = newModel.(Model)
+	model = resizeModel(t, model, 100, terminalHeight)
 
 	view := model.View()
 	lines := strings.Split(view, "\n")
-
-	actualLines := len(lines)
-	if lines[len(lines)-1] == "" {
-		actualLines--
-	}
+	actualLines := countViewLines(view)
 
 	t.Logf("Terminal height: %d, View lines: %d (with bad data)", terminalHeight, actualLines)
 
@@ -3603,29 +3275,22 @@ func TestViewFitsVariousTerminalSizes(t *testing.T) {
 
 	for _, size := range sizes {
 		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
-			engine := &mockEngine{
-				rows: []query.AggregateRow{
-					{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-					{Key: "bob@example.com", Count: 50, TotalSize: 250000},
-				},
+			rows := []query.AggregateRow{
+				{Key: "alice@example.com", Count: 100, TotalSize: 500000},
+				{Key: "bob@example.com", Count: 50, TotalSize: 250000},
 			}
 
-			model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-			model.level = levelAggregates
-			model.viewType = query.ViewSenders
-			model.rows = engine.rows
-			model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
+			model := NewBuilder().
+				WithRows(rows...).
+				WithViewType(query.ViewSenders).
+				WithStats(&query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}).
+				Build()
 
-			newModel, _ := model.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
-			model = newModel.(Model)
+			model = resizeModel(t, model, size.width, size.height)
 
 			view := model.View()
 			lines := strings.Split(view, "\n")
-
-			actualLines := len(lines)
-			if lines[len(lines)-1] == "" {
-				actualLines--
-			}
+			actualLines := countViewLines(view)
 
 			if actualLines != size.height {
 				t.Errorf("View has %d lines but terminal height is %d (pageSize=%d)", actualLines, size.height, model.pageSize)
@@ -3643,23 +3308,20 @@ func TestViewFitsVariousTerminalSizes(t *testing.T) {
 
 // TestViewDuringSpinnerAnimation verifies line count during spinner animation.
 func TestViewDuringSpinnerAnimation(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 100, TotalSize: 500000},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
-	model.loading = true // Loading state shows spinner
+	model := NewBuilder().
+		WithRows(rows...).
+		WithViewType(query.ViewSenders).
+		WithStats(&query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}).
+		WithLoading(true).
+		Build()
 
 	terminalWidth := 100
 	terminalHeight := 24
-	newModel, _ := model.Update(tea.WindowSizeMsg{Width: terminalWidth, Height: terminalHeight})
-	model = newModel.(Model)
+	model = resizeModel(t, model, terminalWidth, terminalHeight)
 
 	// Simulate multiple spinner frames
 	for frame := 0; frame < 10; frame++ {
@@ -3667,11 +3329,7 @@ func TestViewDuringSpinnerAnimation(t *testing.T) {
 
 		view := model.View()
 		lines := strings.Split(view, "\n")
-
-		actualLines := len(lines)
-		if lines[len(lines)-1] == "" {
-			actualLines--
-		}
+		actualLines := countViewLines(view)
 
 		if actualLines != terminalHeight {
 			t.Errorf("Frame %d: View has %d lines but terminal height is %d", frame, actualLines, terminalHeight)
@@ -3688,23 +3346,20 @@ func TestViewDuringSpinnerAnimation(t *testing.T) {
 
 // TestViewLineByLineAnalysis provides detailed line-by-line output for debugging.
 func TestViewLineByLineAnalysis(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-			{Key: "bob@example.com", Count: 50, TotalSize: 250000},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 100, TotalSize: 500000},
+		{Key: "bob@example.com", Count: 50, TotalSize: 250000},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.stats = &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
+	model := NewBuilder().
+		WithRows(rows...).
+		WithViewType(query.ViewSenders).
+		WithStats(&query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}).
+		Build()
 
 	terminalWidth := 100
 	terminalHeight := 55 // User's actual terminal height
-	newModel, _ := model.Update(tea.WindowSizeMsg{Width: terminalWidth, Height: terminalHeight})
-	model = newModel.(Model)
+	model = resizeModel(t, model, terminalWidth, terminalHeight)
 
 	view := model.View()
 	lines := strings.Split(view, "\n")
@@ -3743,41 +3398,28 @@ func TestViewLineByLineAnalysis(t *testing.T) {
 // TestHeaderLineFitsWidth verifies the header line2 doesn't exceed terminal width
 // even when breadcrumb + stats are very long.
 func TestHeaderLineFitsWidth(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 100, TotalSize: 500000},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	// Very long stats string
-	model.stats = &query.TotalStats{MessageCount: 999999999, TotalSize: 999999999999, AttachmentCount: 999999}
+	model := NewBuilder().
+		WithRows(rows...).
+		WithViewType(query.ViewSenders).
+		// Very long stats string
+		WithStats(&query.TotalStats{MessageCount: 999999999, TotalSize: 999999999999, AttachmentCount: 999999}).
+		Build()
 
 	terminalWidth := 80 // Narrower terminal
 	terminalHeight := 40
-	newModel, _ := model.Update(tea.WindowSizeMsg{Width: terminalWidth, Height: terminalHeight})
-	model = newModel.(Model)
+	model = resizeModel(t, model, terminalWidth, terminalHeight)
 
 	view := model.View()
 	lines := strings.Split(view, "\n")
-
-	actualLines := len(lines)
-	if lines[len(lines)-1] == "" {
-		actualLines--
-	}
+	actualLines := countViewLines(view)
 
 	t.Logf("Terminal: %dx%d, View lines: %d", terminalWidth, terminalHeight, actualLines)
 
-	if actualLines > terminalHeight {
-		t.Errorf("View has %d lines but terminal height is %d - header overflow?", actualLines, terminalHeight)
-		// Show first few lines
-		for i := 0; i < 5 && i < len(lines); i++ {
-			t.Logf("  Line %d (width %d): %q", i, lipgloss.Width(lines[i]), truncateTestString(lines[i], 60))
-		}
-	}
+	assertViewFitsHeight(t, view, terminalHeight)
 
 	// Check that no line exceeds terminal width
 	for i, line := range lines[:min(5, len(lines))] {
@@ -3792,21 +3434,17 @@ func TestHeaderLineFitsWidth(t *testing.T) {
 // "N of M" format when TotalUnique is set and greater than loaded rows.
 func TestFooterShowsTotalUniqueWhenAvailable(t *testing.T) {
 	// Set up rows with TotalUnique set (simulating a query that returns more rows than loaded)
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000, TotalUnique: 1000},
-			{Key: "bob@example.com", Count: 50, TotalSize: 250000, TotalUnique: 1000},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 100, TotalSize: 500000, TotalUnique: 1000},
+		{Key: "bob@example.com", Count: 50, TotalSize: 250000, TotalUnique: 1000},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.width = 100
-	model.height = 30
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.pageSize = 20
-	model.cursor = 0
+	model := NewBuilder().
+		WithRows(rows...).
+		WithViewType(query.ViewSenders).
+		WithSize(100, 30).
+		WithPageSize(20).
+		Build()
 
 	footer := model.footerView()
 
@@ -3820,21 +3458,17 @@ func TestFooterShowsTotalUniqueWhenAvailable(t *testing.T) {
 // to showing loaded count when TotalUnique is not set (zero value).
 func TestFooterShowsLoadedCountWhenNoTotalUnique(t *testing.T) {
 	// Set up rows without TotalUnique (zero value)
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 500000},
-			{Key: "bob@example.com", Count: 50, TotalSize: 250000},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 100, TotalSize: 500000},
+		{Key: "bob@example.com", Count: 50, TotalSize: 250000},
 	}
 
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "abc1234"})
-	model.width = 100
-	model.height = 30
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.pageSize = 20
-	model.cursor = 0
+	model := NewBuilder().
+		WithRows(rows...).
+		WithViewType(query.ViewSenders).
+		WithSize(100, 30).
+		WithPageSize(20).
+		Build()
 
 	footer := model.footerView()
 
@@ -3880,19 +3514,16 @@ func TestViewTypePrefixFallback(t *testing.T) {
 // TestDetailNavigationPrevNext verifies left/right arrow navigation in message detail view.
 // Left = previous in list (lower index), Right = next in list (higher index).
 func TestDetailNavigationPrevNext(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up message detail view with messages loaded
-	model.level = levelMessageDetail
-	model.messages = []query.MessageSummary{
-		{ID: 1, Subject: "First message"},
-		{ID: 2, Subject: "Second message"},
-		{ID: 3, Subject: "Third message"},
-	}
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "First message"},
+			query.MessageSummary{ID: 2, Subject: "Second message"},
+			query.MessageSummary{ID: 3, Subject: "Third message"},
+		).
+		WithDetail(&query.MessageDetail{ID: 2, Subject: "Second message"}).
+		WithLevel(levelMessageDetail).Build()
 	model.detailMessageIndex = 1 // Viewing second message
 	model.cursor = 1
-	model.messageDetail = &query.MessageDetail{ID: 2, Subject: "Second message"}
 
 	// Press right arrow to go to next message in list (higher index)
 	newModel, cmd := model.Update(keyRight())
@@ -3931,18 +3562,14 @@ func TestDetailNavigationPrevNext(t *testing.T) {
 // TestDetailNavigationAtBoundary verifies flash message at first/last message.
 // TestDetailNavigationAtBoundary verifies flash message at first/last message.
 func TestDetailNavigationAtBoundary(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up message detail view at first message (index 0)
-	model.level = levelMessageDetail
-	model.messages = []query.MessageSummary{
-		{ID: 1, Subject: "First message"},
-		{ID: 2, Subject: "Second message"},
-	}
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "First message"},
+			query.MessageSummary{ID: 2, Subject: "Second message"},
+		).
+		WithDetail(&query.MessageDetail{ID: 1, Subject: "First message"}).
+		WithLevel(levelMessageDetail).Build()
 	model.detailMessageIndex = 0 // At first message
-	model.cursor = 0
-	model.messageDetail = &query.MessageDetail{ID: 1, Subject: "First message"}
 
 	// Press left arrow at first message - should show flash
 	newModel, cmd := model.Update(keyLeft())
@@ -3982,19 +3609,16 @@ func TestDetailNavigationAtBoundary(t *testing.T) {
 // TestDetailNavigationHLKeys verifies h/l keys also work for prev/next.
 // h=left=prev (lower index), l=right=next (higher index).
 func TestDetailNavigationHLKeys(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up message detail view
-	model.level = levelMessageDetail
-	model.messages = []query.MessageSummary{
-		{ID: 1, Subject: "First"},
-		{ID: 2, Subject: "Second"},
-		{ID: 3, Subject: "Third"},
-	}
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "First"},
+			query.MessageSummary{ID: 2, Subject: "Second"},
+			query.MessageSummary{ID: 3, Subject: "Third"},
+		).
+		WithDetail(&query.MessageDetail{ID: 2, Subject: "Second"}).
+		WithLevel(levelMessageDetail).Build()
 	model.detailMessageIndex = 1
 	model.cursor = 1
-	model.messageDetail = &query.MessageDetail{ID: 2, Subject: "Second"}
 
 	// Press 'l' to go to next message in list (higher index)
 	newModel, _ := model.Update(key('l'))
@@ -4017,14 +3641,8 @@ func TestDetailNavigationHLKeys(t *testing.T) {
 
 // TestDetailNavigationEmptyList verifies navigation with empty message list.
 func TestDetailNavigationEmptyList(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up detail view with empty messages (edge case)
-	model.level = levelMessageDetail
-	model.messages = []query.MessageSummary{} // Empty!
+	model := NewBuilder().WithLevel(levelMessageDetail).Build()
 	model.detailMessageIndex = 0
-	model.cursor = 0
 
 	// Press right arrow - should show flash, not panic
 	newModel, _ := model.navigateDetailNext()
@@ -4045,14 +3663,9 @@ func TestDetailNavigationEmptyList(t *testing.T) {
 
 // TestDetailNavigationOutOfBoundsIndex verifies clamping of stale index.
 func TestDetailNavigationOutOfBoundsIndex(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up detail view with index beyond list bounds (simulates stale state)
-	model.level = levelMessageDetail
-	model.messages = []query.MessageSummary{
-		{ID: 1, Subject: "Only message"},
-	}
+	model := NewBuilder().
+		WithMessages(query.MessageSummary{ID: 1, Subject: "Only message"}).
+		WithLevel(levelMessageDetail).Build()
 	model.detailMessageIndex = 5 // Out of bounds!
 	model.cursor = 5
 
@@ -4074,20 +3687,14 @@ func TestDetailNavigationOutOfBoundsIndex(t *testing.T) {
 // TestDetailNavigationCursorPreservedOnGoBack verifies cursor position is preserved
 // when returning to message list after navigating in detail view.
 func TestDetailNavigationCursorPreservedOnGoBack(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up message list view
-	model.level = levelMessageList
-	model.messages = []query.MessageSummary{
-		{ID: 1, Subject: "First"},
-		{ID: 2, Subject: "Second"},
-		{ID: 3, Subject: "Third"},
-	}
-	model.cursor = 0 // Start at first message
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "First"},
+			query.MessageSummary{ID: 2, Subject: "Second"},
+			query.MessageSummary{ID: 3, Subject: "Third"},
+		).
+		WithLevel(levelMessageList).
+		WithPageSize(10).WithSize(100, 20).Build()
 
 	// Enter detail view (simulates pressing Enter on first message)
 	model.breadcrumbs = append(model.breadcrumbs, navigationSnapshot{state: viewState{
@@ -4122,8 +3729,11 @@ func TestDetailNavigationCursorPreservedOnGoBack(t *testing.T) {
 // uses threadMessages (not messages) when entered from thread view, and keeps
 // threadCursor and threadScrollOffset in sync.
 func TestDetailNavigationFromThreadView(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "List msg 1"},
+			query.MessageSummary{ID: 2, Subject: "List msg 2"},
+		).Build()
 
 	// Set up thread view with different messages than the list
 	model.threadMessages = []query.MessageSummary{
@@ -4131,11 +3741,6 @@ func TestDetailNavigationFromThreadView(t *testing.T) {
 		{ID: 101, Subject: "Thread msg 2"},
 		{ID: 102, Subject: "Thread msg 3"},
 		{ID: 103, Subject: "Thread msg 4"},
-	}
-	// Set up regular messages list (should NOT be used)
-	model.messages = []query.MessageSummary{
-		{ID: 1, Subject: "List msg 1"},
-		{ID: 2, Subject: "List msg 2"},
 	}
 
 	// Enter detail view from thread view (simulates pressing Enter in thread view)
@@ -4219,11 +3824,9 @@ func TestDetailNavigationFromThreadView(t *testing.T) {
 // TestLayoutFitsTerminalHeight verifies views render correctly without blank lines
 // or truncated footers at various terminal heights.
 func TestLayoutFitsTerminalHeight(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 5},
-			{Key: "bob@example.com", Count: 3},
-		},
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 5},
+		{Key: "bob@example.com", Count: 3},
 	}
 
 	tests := []struct {
@@ -4241,13 +3844,9 @@ func TestLayoutFitsTerminalHeight(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-			model.rows = engine.rows
-			model.width = 100
-			model.height = tc.height
-			model.pageSize = tc.height - 5
-			model.loading = false
-			model.level = tc.level
+			model := NewBuilder().WithRows(rows...).
+				WithSize(100, tc.height).WithPageSize(tc.height-5).
+				WithLevel(tc.level).Build()
 
 			// Set up messages for message list/detail views
 			if tc.level == levelMessageList || tc.level == levelMessageDetail {
@@ -4293,17 +3892,11 @@ func TestLayoutFitsTerminalHeight(t *testing.T) {
 
 // TestScrollClampingAfterResize verifies detailScroll is clamped when max changes.
 func TestScrollClampingAfterResize(t *testing.T) {
-	engine := &mockEngine{}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-
-	// Set up detail view with scroll position
-	model.level = levelMessageDetail
-	model.width = 100
-	model.height = 20
-	model.pageSize = 15
+	model := NewBuilder().
+		WithDetail(&query.MessageDetail{ID: 1, Subject: "Test", BodyText: "Content"}).
+		WithLevel(levelMessageDetail).WithSize(100, 20).WithPageSize(15).Build()
 	model.detailLineCount = 50
 	model.detailScroll = 40 // Near the end
-	model.messageDetail = &query.MessageDetail{ID: 1, Subject: "Test", BodyText: "Content"}
 
 	// Simulate resize that increases page size (reducing max scroll)
 	// New max scroll would be 50 - 20 = 30, but detailScroll is 40
@@ -4333,20 +3926,14 @@ func TestModalCompositingPreservesANSI(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI)
 	defer lipgloss.SetColorProfile(origProfile)
 
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 100, TotalSize: 1000000},
-			{Key: "bob@example.com", Count: 50, TotalSize: 500000},
-			{Key: "charlie@example.com", Count: 25, TotalSize: 250000},
-		},
-	}
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.rows = engine.rows
-	model.width = 80
-	model.height = 24
-	model.pageSize = 19
-	model.loading = false
-	model.modal = modalQuitConfirm
+	model := NewBuilder().
+		WithRows(
+			query.AggregateRow{Key: "alice@example.com", Count: 100, TotalSize: 1000000},
+			query.AggregateRow{Key: "bob@example.com", Count: 50, TotalSize: 500000},
+			query.AggregateRow{Key: "charlie@example.com", Count: 25, TotalSize: 250000},
+		).
+		WithSize(80, 24).WithPageSize(19).
+		WithModal(modalQuitConfirm).Build()
 
 	// Render the view with quit modal - this uses overlayModal
 	view := model.View()
@@ -4420,23 +4007,15 @@ func TestModalCompositingPreservesANSI(t *testing.T) {
 // TestSubAggregateAKeyJumpsToMessages verifies 'a' key in sub-aggregate view
 // jumps to message list with the drill filter applied.
 func TestSubAggregateAKeyJumpsToMessages(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "work", Count: 5},
-			{Key: "personal", Count: 3},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelDrillDown
-	model.viewType = query.ViewLabels
+	model := NewBuilder().
+		WithRows(
+			query.AggregateRow{Key: "work", Count: 5},
+			query.AggregateRow{Key: "personal", Count: 3},
+		).
+		WithLevel(levelDrillDown).WithViewType(query.ViewLabels).
+		WithPageSize(10).WithSize(100, 20).Build()
 	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
 	model.drillViewType = query.ViewSenders
-	model.rows = engine.rows
-	model.pageSize = 10
-	model.cursor = 0
-	model.width = 100
-	model.height = 20
 
 	// Press 'a' to jump to all messages (with drill filter)
 	newModel, cmd := model.handleAggregateKeys(key('a'))
@@ -4470,23 +4049,17 @@ func TestSubAggregateAKeyJumpsToMessages(t *testing.T) {
 
 // TestDKeyAutoSelectsCurrentRow verifies 'd' key selects current row when nothing selected.
 func TestDKeyAutoSelectsCurrentRow(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 10},
-			{Key: "bob@example.com", Count: 5},
-		},
-		gmailIDs: []string{"msg1", "msg2"},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.pageSize = 10
+	model := NewBuilder().
+		WithRows(
+			query.AggregateRow{Key: "alice@example.com", Count: 10},
+			query.AggregateRow{Key: "bob@example.com", Count: 5},
+		).
+		WithGmailIDs("msg1", "msg2").
+		WithViewType(query.ViewSenders).
+		WithPageSize(10).WithSize(100, 20).
+		WithAccounts(query.AccountInfo{ID: 1, Identifier: "test@gmail.com"}).
+		Build()
 	model.cursor = 1 // On bob@example.com
-	model.width = 100
-	model.height = 20
-	model.accounts = []query.AccountInfo{{ID: 1, Identifier: "test@gmail.com"}}
 
 	// Verify nothing is selected
 	if model.hasSelection() {
@@ -4494,8 +4067,7 @@ func TestDKeyAutoSelectsCurrentRow(t *testing.T) {
 	}
 
 	// Press 'd' without selecting anything first
-	newModel, _ := model.handleAggregateKeys(key('d'))
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, key('d'))
 
 	// Should have auto-selected current row
 	if !m.selection.aggregateKeys["bob@example.com"] {
@@ -4510,31 +4082,24 @@ func TestDKeyAutoSelectsCurrentRow(t *testing.T) {
 
 // TestDKeyWithExistingSelection verifies 'd' key uses existing selection when present.
 func TestDKeyWithExistingSelection(t *testing.T) {
-	engine := &mockEngine{
-		rows: []query.AggregateRow{
-			{Key: "alice@example.com", Count: 10},
-			{Key: "bob@example.com", Count: 5},
-		},
-		gmailIDs: []string{"msg1", "msg2"},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelAggregates
-	model.viewType = query.ViewSenders
-	model.rows = engine.rows
-	model.pageSize = 10
+	model := NewBuilder().
+		WithRows(
+			query.AggregateRow{Key: "alice@example.com", Count: 10},
+			query.AggregateRow{Key: "bob@example.com", Count: 5},
+		).
+		WithGmailIDs("msg1", "msg2").
+		WithViewType(query.ViewSenders).
+		WithPageSize(10).WithSize(100, 20).
+		WithAccounts(query.AccountInfo{ID: 1, Identifier: "test@gmail.com"}).
+		Build()
 	model.cursor = 1 // On bob@example.com
-	model.width = 100
-	model.height = 20
-	model.accounts = []query.AccountInfo{{ID: 1, Identifier: "test@gmail.com"}}
 
 	// Pre-select alice (not the current row)
 	model.selection.aggregateKeys["alice@example.com"] = true
 	model.selection.aggregateViewType = query.ViewSenders
 
 	// Press 'd' - should use existing selection, not auto-select current row
-	newModel, _ := model.handleAggregateKeys(key('d'))
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, key('d'))
 
 	// Should still have alice selected
 	if !m.selection.aggregateKeys["alice@example.com"] {
@@ -4554,21 +4119,15 @@ func TestDKeyWithExistingSelection(t *testing.T) {
 
 // TestMessageListDKeyAutoSelectsCurrentMessage verifies 'd' in message list auto-selects.
 func TestMessageListDKeyAutoSelectsCurrentMessage(t *testing.T) {
-	engine := &mockEngine{
-		messages: []query.MessageSummary{
-			{ID: 1, SourceMessageID: "msg1", Subject: "Hello"},
-			{ID: 2, SourceMessageID: "msg2", Subject: "World"},
-		},
-	}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageList
-	model.messages = engine.messages
-	model.pageSize = 10
-	model.cursor = 0 // On first message
-	model.width = 100
-	model.height = 20
-	model.accounts = []query.AccountInfo{{ID: 1, Identifier: "test@gmail.com"}}
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, SourceMessageID: "msg1", Subject: "Hello"},
+			query.MessageSummary{ID: 2, SourceMessageID: "msg2", Subject: "World"},
+		).
+		WithLevel(levelMessageList).
+		WithPageSize(10).WithSize(100, 20).
+		WithAccounts(query.AccountInfo{ID: 1, Identifier: "test@gmail.com"}).
+		Build()
 
 	// Verify nothing is selected
 	if model.hasSelection() {
@@ -4576,8 +4135,7 @@ func TestMessageListDKeyAutoSelectsCurrentMessage(t *testing.T) {
 	}
 
 	// Press 'd' without selecting anything first
-	newModel, _ := model.handleMessageListKeys(key('d'))
-	m := newModel.(Model)
+	m := applyMessageListKey(t, model, key('d'))
 
 	// Should have auto-selected current message
 	if !m.selection.messageIDs[1] {
@@ -4591,25 +4149,20 @@ func TestMessageListDKeyAutoSelectsCurrentMessage(t *testing.T) {
 }
 
 func TestExportAttachmentsModal(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageDetail
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.messageDetail = &query.MessageDetail{
-		ID:      1,
-		Subject: "Test Email",
-		Attachments: []query.AttachmentInfo{
-			{ID: 1, Filename: "file1.pdf", Size: 1024, ContentHash: "abc123"},
-			{ID: 2, Filename: "file2.txt", Size: 512, ContentHash: "def456"},
-		},
-	}
+	model := NewBuilder().
+		WithDetail(&query.MessageDetail{
+			ID:      1,
+			Subject: "Test Email",
+			Attachments: []query.AttachmentInfo{
+				{ID: 1, Filename: "file1.pdf", Size: 1024, ContentHash: "abc123"},
+				{ID: 2, Filename: "file2.txt", Size: 512, ContentHash: "def456"},
+			},
+		}).
+		WithLevel(levelMessageDetail).
+		WithPageSize(10).WithSize(100, 20).Build()
 
 	// Press 'e' to open export modal
-	newModel, _ := model.handleMessageDetailKeys(key('e'))
-	m := newModel.(Model)
+	m := applyDetailKey(t, model, key('e'))
 
 	if m.modal != modalExportAttachments {
 		t.Errorf("expected modalExportAttachments, got %v", m.modal)
@@ -4624,36 +4177,31 @@ func TestExportAttachmentsModal(t *testing.T) {
 	}
 
 	// Test navigation - move cursor down
-	newModel, _ = m.handleModalKeys(key('j'))
-	m = newModel.(Model)
+	m, _ = applyModalKey(t, m, key('j'))
 	if m.exportCursor != 1 {
 		t.Errorf("expected exportCursor = 1, got %d", m.exportCursor)
 	}
 
 	// Test toggle selection with space
-	newModel, _ = m.handleModalKeys(key(' '))
-	m = newModel.(Model)
+	m, _ = applyModalKey(t, m, key(' '))
 	if m.exportSelection[1] {
 		t.Error("expected attachment 1 to be deselected after space")
 	}
 
 	// Test select none
-	newModel, _ = m.handleModalKeys(key('n'))
-	m = newModel.(Model)
+	m, _ = applyModalKey(t, m, key('n'))
 	if m.exportSelection[0] || m.exportSelection[1] {
 		t.Error("expected all attachments to be deselected after 'n'")
 	}
 
 	// Test select all
-	newModel, _ = m.handleModalKeys(key('a'))
-	m = newModel.(Model)
+	m, _ = applyModalKey(t, m, key('a'))
 	if !m.exportSelection[0] || !m.exportSelection[1] {
 		t.Error("expected all attachments to be selected after 'a'")
 	}
 
 	// Test cancel with Esc
-	newModel, _ = m.handleModalKeys(keyEsc())
-	m = newModel.(Model)
+	m, _ = applyModalKey(t, m, keyEsc())
 	if m.modal != modalNone {
 		t.Errorf("expected modalNone after Esc, got %v", m.modal)
 	}
@@ -4663,22 +4211,17 @@ func TestExportAttachmentsModal(t *testing.T) {
 }
 
 func TestExportAttachmentsNoAttachments(t *testing.T) {
-	engine := &mockEngine{}
-
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.level = levelMessageDetail
-	model.pageSize = 10
-	model.width = 100
-	model.height = 20
-	model.messageDetail = &query.MessageDetail{
-		ID:          1,
-		Subject:     "Test Email",
-		Attachments: []query.AttachmentInfo{}, // No attachments
-	}
+	model := NewBuilder().
+		WithDetail(&query.MessageDetail{
+			ID:          1,
+			Subject:     "Test Email",
+			Attachments: []query.AttachmentInfo{}, // No attachments
+		}).
+		WithLevel(levelMessageDetail).
+		WithPageSize(10).WithSize(100, 20).Build()
 
 	// Press 'e' should show flash message, not modal
-	newModel, _ := model.handleMessageDetailKeys(key('e'))
-	m := newModel.(Model)
+	m := applyDetailKey(t, model, key('e'))
 
 	if m.modal == modalExportAttachments {
 		t.Error("expected modal NOT to open when no attachments")
@@ -4871,8 +4414,7 @@ func TestSubAggregateDrillDownPreservesSelection(t *testing.T) {
 
 	// Step 1: Drill down from top-level to message list (Enter on alice)
 	model.cursor = 0
-	newModel, _ := model.handleAggregateKeys(keyEnter())
-	m1 := newModel.(Model)
+	m1 := applyAggregateKey(t, model, keyEnter())
 	if m1.level != levelMessageList {
 		t.Fatalf("expected levelMessageList, got %v", m1.level)
 	}
@@ -4883,8 +4425,7 @@ func TestSubAggregateDrillDownPreservesSelection(t *testing.T) {
 		{Key: "domain2.com", Count: 40, TotalSize: 200000},
 	}
 	m1.loading = false
-	newModel2, _ := m1.handleMessageListKeys(keyTab())
-	m2 := newModel2.(Model)
+	m2 := applyMessageListKey(t, m1, keyTab())
 	if m2.level != levelDrillDown {
 		t.Fatalf("expected levelDrillDown, got %v", m2.level)
 	}
@@ -4898,8 +4439,7 @@ func TestSubAggregateDrillDownPreservesSelection(t *testing.T) {
 	m2.selection.aggregateKeys["domain2.com"] = true
 	m2.cursor = 0
 
-	newModel3, _ := m2.handleAggregateKeys(keyEnter())
-	m3 := newModel3.(Model)
+	m3 := applyAggregateKey(t, m2, keyEnter())
 	if m3.level != levelMessageList {
 		t.Fatalf("expected levelMessageList after sub-agg Enter, got %v", m3.level)
 	}
@@ -4923,8 +4463,7 @@ func TestTopLevelDrillDownClearsSelection(t *testing.T) {
 	model.selection.aggregateKeys["bob@example.com"] = true
 	model.cursor = 0
 
-	newModel, _ := model.handleAggregateKeys(keyEnter())
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, keyEnter())
 	if m.level != levelMessageList {
 		t.Fatalf("expected levelMessageList, got %v", m.level)
 	}
@@ -4965,8 +4504,7 @@ func TestTopLevelTimeDrillDown_AllGranularities(t *testing.T) {
 			model.timeGranularity = tt.granularity
 			model.cursor = 0
 
-			newModel, _ := model.handleAggregateKeys(keyEnter())
-			m := newModel.(Model)
+			m := applyAggregateKey(t, model, keyEnter())
 
 			assertLevel(t, m, levelMessageList)
 
@@ -5018,8 +4556,7 @@ func TestSubAggregateTimeDrillDown_AllGranularities(t *testing.T) {
 			model.timeGranularity = tt.subGranularity
 			model.cursor = 0
 
-			newModel, _ := model.handleAggregateKeys(keyEnter())
-			m := newModel.(Model)
+			m := applyAggregateKey(t, model, keyEnter())
 
 			assertLevel(t, m, levelMessageList)
 
@@ -5058,8 +4595,7 @@ func TestSubAggregateTimeDrillDown_NonTimeViewPreservesGranularity(t *testing.T)
 	model.timeGranularity = query.TimeMonth // Different from drillFilter
 	model.cursor = 0
 
-	newModel, _ := model.handleAggregateKeys(keyEnter())
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, keyEnter())
 
 	assertLevel(t, m, levelMessageList)
 
@@ -5085,8 +4621,7 @@ func TestTopLevelTimeDrillDown_GranularityChangedBeforeEnter(t *testing.T) {
 	model.timeGranularity = query.TimeYear
 	model.cursor = 0
 
-	newModel, _ := model.handleAggregateKeys(keyEnter())
-	m := newModel.(Model)
+	m := applyAggregateKey(t, model, keyEnter())
 
 	assertLevel(t, m, levelMessageList)
 	if m.drillFilter.TimeGranularity != query.TimeYear {
@@ -5110,8 +4645,7 @@ func TestSubAggregateTimeDrillDown_FullScenario(t *testing.T) {
 	// Step 1: Drill into alice (top-level, creates drillFilter with TimeMonth default)
 	model.timeGranularity = query.TimeMonth // default
 	model.cursor = 0
-	m1, _ := model.handleAggregateKeys(keyEnter())
-	step1 := m1.(Model)
+	step1 := applyAggregateKey(t, model, keyEnter())
 	assertLevel(t, step1, levelMessageList)
 
 	if step1.drillFilter.TimeGranularity != query.TimeMonth {
@@ -5121,8 +4655,7 @@ func TestSubAggregateTimeDrillDown_FullScenario(t *testing.T) {
 	// Step 2: Tab to sub-aggregate view
 	step1.rows = nil
 	step1.loading = false
-	m2, _ := step1.handleMessageListKeys(keyTab())
-	step2 := m2.(Model)
+	step2 := applyMessageListKey(t, step1, keyTab())
 	assertLevel(t, step2, levelDrillDown)
 
 	// Simulate sub-agg data loaded, switch to Time view, toggle to Year
@@ -5136,8 +4669,7 @@ func TestSubAggregateTimeDrillDown_FullScenario(t *testing.T) {
 
 	// Step 3: Enter on "2024" — this was the bug
 	step2.cursor = 0
-	m3, _ := step2.handleAggregateKeys(keyEnter())
-	step3 := m3.(Model)
+	step3 := applyAggregateKey(t, step2, keyEnter())
 
 	assertLevel(t, step3, levelMessageList)
 
