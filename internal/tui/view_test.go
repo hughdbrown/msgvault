@@ -9,6 +9,9 @@ import (
 	"github.com/muesli/termenv"
 )
 
+// ansiStart is the escape sequence prefix found in styled terminal output.
+const ansiStart = "\x1b["
+
 // colorProfileMu serializes tests that mutate the global lipgloss color profile.
 var colorProfileMu sync.Mutex
 
@@ -46,124 +49,62 @@ func stripANSI(s string) string {
 	return out.String()
 }
 
+// assertHighlight checks that applyHighlight produces the expected plain text
+// (after stripping ANSI) and, when wantANSI is true, that the raw output
+// contains ANSI escape sequences.
+func assertHighlight(t *testing.T, text string, terms []string, wantText string, wantANSI bool) {
+	t.Helper()
+	result := applyHighlight(text, terms)
+	stripped := stripANSI(result)
+	if stripped != wantText {
+		t.Errorf("text content mismatch:\n  got:  %q\n  want: %q", stripped, wantText)
+	}
+	if wantANSI {
+		if !strings.Contains(result, ansiStart) {
+			t.Errorf("expected raw output to contain ANSI escapes, got %q", result)
+		}
+	}
+}
+
+// assertHighlightUnchanged checks that applyHighlight returns the input
+// unchanged when no terms match.
+func assertHighlightUnchanged(t *testing.T, text string, terms []string) {
+	t.Helper()
+	result := applyHighlight(text, terms)
+	if result != text {
+		t.Errorf("expected unchanged output for no match, got: %q", result)
+	}
+}
+
 func TestApplyHighlight(t *testing.T) {
 	tests := []struct {
 		name     string
 		text     string
 		terms    []string
-		wantText string // expected text content after stripping ANSI
-		wantHas  string // substring that must appear in raw output (with ANSI)
+		wantText string
+		wantANSI bool
 	}{
-		{
-			name:     "no terms",
-			text:     "hello world",
-			terms:    nil,
-			wantText: "hello world",
-		},
-		{
-			name:     "single match",
-			text:     "hello world",
-			terms:    []string{"world"},
-			wantText: "hello world",
-			wantHas:  "\x1b[",
-		},
-		{
-			name:     "case insensitive",
-			text:     "Hello World",
-			terms:    []string{"hello"},
-			wantText: "Hello World",
-			wantHas:  "\x1b[",
-		},
-		{
-			name:     "multiple terms",
-			text:     "hello world foo",
-			terms:    []string{"hello", "foo"},
-			wantText: "hello world foo",
-			wantHas:  "\x1b[",
-		},
-		{
-			name:     "overlapping matches",
-			text:     "abcdef",
-			terms:    []string{"abcd", "cdef"},
-			wantText: "abcdef",
-			wantHas:  "\x1b[",
-		},
-		{
-			name:     "adjacent matches",
-			text:     "aabb",
-			terms:    []string{"aa", "bb"},
-			wantText: "aabb",
-			wantHas:  "\x1b[",
-		},
-		{
-			name:     "nested matches",
-			text:     "abcdef",
-			terms:    []string{"abcdef", "cd"},
-			wantText: "abcdef",
-			wantHas:  "\x1b[",
-		},
-		{
-			name:     "no match",
-			text:     "hello world",
-			terms:    []string{"xyz"},
-			wantText: "hello world",
-		},
-		{
-			name:     "unicode text",
-			text:     "café résumé",
-			terms:    []string{"café"},
-			wantText: "café résumé",
-			wantHas:  "\x1b[",
-		},
-		{
-			name:     "unicode case folding",
-			text:     "Ünïcödé",
-			terms:    []string{"ünïcödé"},
-			wantText: "Ünïcödé",
-			wantHas:  "\x1b[",
-		},
-		{
-			name:     "empty text",
-			text:     "",
-			terms:    []string{"hello"},
-			wantText: "",
-		},
-		{
-			name:     "empty term filtered",
-			text:     "hello",
-			terms:    []string{""},
-			wantText: "hello",
-		},
-		{
-			name:     "CJK characters",
-			text:     "hello 世界 world",
-			terms:    []string{"世界"},
-			wantText: "hello 世界 world",
-			wantHas:  "\x1b[",
-		},
-		{
-			name:     "repeated matches",
-			text:     "ababab",
-			terms:    []string{"ab"},
-			wantText: "ababab",
-			wantHas:  "\x1b[",
-		},
+		{"no terms", "hello world", nil, "hello world", false},
+		{"single match", "hello world", []string{"world"}, "hello world", true},
+		{"case insensitive", "Hello World", []string{"hello"}, "Hello World", true},
+		{"multiple terms", "hello world foo", []string{"hello", "foo"}, "hello world foo", true},
+		{"overlapping matches", "abcdef", []string{"abcd", "cdef"}, "abcdef", true},
+		{"adjacent matches", "aabb", []string{"aa", "bb"}, "aabb", true},
+		{"nested matches", "abcdef", []string{"abcdef", "cd"}, "abcdef", true},
+		{"no match", "hello world", []string{"xyz"}, "hello world", false},
+		{"unicode text", "café résumé", []string{"café"}, "café résumé", true},
+		{"unicode case folding", "Ünïcödé", []string{"ünïcödé"}, "Ünïcödé", true},
+		{"empty text", "", []string{"hello"}, "", false},
+		{"empty term filtered", "hello", []string{""}, "hello", false},
+		{"CJK characters", "hello 世界 world", []string{"世界"}, "hello 世界 world", true},
+		{"repeated matches", "ababab", []string{"ab"}, "ababab", true},
 	}
 
 	forceColorProfile(t)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := applyHighlight(tt.text, tt.terms)
-			stripped := stripANSI(result)
-			if stripped != tt.wantText {
-				t.Errorf("text content mismatch:\n  got:  %q\n  want: %q", stripped, tt.wantText)
-			}
-			if tt.wantHas != "" {
-				if !strings.Contains(result, tt.wantHas) {
-					t.Errorf("expected raw output to contain %q, got %q", tt.wantHas, result)
-				}
-			}
+			assertHighlight(t, tt.text, tt.terms, tt.wantText, tt.wantANSI)
 		})
 	}
 }
@@ -181,8 +122,5 @@ func TestApplyHighlightProducesOutput(t *testing.T) {
 	}
 
 	// No match should return input unchanged
-	result = applyHighlight("hello world", []string{"xyz"})
-	if result != "hello world" {
-		t.Errorf("expected unchanged output for no match, got: %q", result)
-	}
+	assertHighlightUnchanged(t, "hello world", []string{"xyz"})
 }
