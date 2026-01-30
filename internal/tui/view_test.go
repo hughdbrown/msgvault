@@ -8,6 +8,16 @@ import (
 	"github.com/muesli/termenv"
 )
 
+// forceColorProfile sets lipgloss to ANSI color output for tests that assert
+// on styled output. It restores the original profile via t.Cleanup.
+// WARNING: This mutates a global. Tests using this helper must NOT use t.Parallel().
+func forceColorProfile(t *testing.T) {
+	t.Helper()
+	orig := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	t.Cleanup(func() { lipgloss.SetColorProfile(orig) })
+}
+
 func stripANSI(s string) string {
 	// Simple ANSI stripper for test assertions
 	var out strings.Builder
@@ -132,10 +142,7 @@ func TestApplyHighlight(t *testing.T) {
 		},
 	}
 
-	// Force color output so lipgloss produces ANSI escapes even in non-TTY.
-	origProfile := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.ANSI)
-	defer lipgloss.SetColorProfile(origProfile)
+	forceColorProfile(t)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -154,10 +161,7 @@ func TestApplyHighlight(t *testing.T) {
 }
 
 func TestApplyHighlightProducesOutput(t *testing.T) {
-	// Force color output so lipgloss produces ANSI escapes even in non-TTY.
-	origProfile := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.ANSI)
-	defer lipgloss.SetColorProfile(origProfile)
+	forceColorProfile(t)
 
 	// Verify that highlighting actually modifies the output when matches exist.
 	result := applyHighlight("hello world", []string{"world"})
