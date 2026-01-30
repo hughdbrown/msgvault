@@ -99,7 +99,8 @@ type TestModelBuilder struct {
 	accounts      []query.AccountInfo
 	width         int
 	height        int
-	pageSize      int // explicit override; 0 means auto-calculate from height
+	pageSize      int  // explicit override; 0 means auto-calculate from height
+	rawPageSize   bool // when true, pageSize is set without clamping
 	viewType      query.ViewType
 	level         viewLevel
 	dataDir       string
@@ -166,6 +167,13 @@ func (b *TestModelBuilder) WithPageSize(size int) *TestModelBuilder {
 	return b
 }
 
+// WithPageSizeRaw sets pageSize without clamping, allowing zero/negative values for edge-case testing.
+func (b *TestModelBuilder) WithPageSizeRaw(size int) *TestModelBuilder {
+	b.pageSize = size
+	b.rawPageSize = true
+	return b
+}
+
 func (b *TestModelBuilder) WithLoading(loading bool) *TestModelBuilder {
 	b.loading = &loading
 	return b
@@ -202,7 +210,9 @@ func (b *TestModelBuilder) Build() Model {
 	model := New(engine, Options{DataDir: b.dataDir, Version: b.version})
 	model.width = b.width
 	model.height = b.height
-	if b.pageSize > 0 {
+	if b.rawPageSize {
+		model.pageSize = b.pageSize
+	} else if b.pageSize > 0 {
 		model.pageSize = b.pageSize
 	} else {
 		model.pageSize = b.height - 5
@@ -222,10 +232,10 @@ func (b *TestModelBuilder) Build() Model {
 		model.messageDetail = b.messageDetail
 	}
 
-	// Loading: explicit if set, otherwise false when data is provided
+	// Loading: explicit if set, otherwise false only when data is provided
 	if b.loading != nil {
 		model.loading = *b.loading
-	} else {
+	} else if len(b.rows) > 0 || len(b.messages) > 0 || b.messageDetail != nil {
 		model.loading = false
 	}
 
@@ -1499,7 +1509,7 @@ func TestInlineSearchTabToggleAtMessageList(t *testing.T) {
 // TestInlineSearchTabToggleNoQueryNoSearch verifies Tab with empty query doesn't trigger search.
 func TestInlineSearchTabToggleNoQueryNoSearch(t *testing.T) {
 	model := NewBuilder().WithPageSize(10).WithSize(100, 20).
-		WithLevel(levelMessageList).Build()
+		WithLevel(levelMessageList).WithLoading(false).Build()
 	model.inlineSearchActive = true
 	model.searchMode = searchModeFast
 	model.searchInput.SetValue("") // Empty query
