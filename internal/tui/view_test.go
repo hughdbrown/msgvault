@@ -126,6 +126,11 @@ func TestApplyHighlight(t *testing.T) {
 		},
 	}
 
+	// Force color output so lipgloss produces ANSI escapes even in non-TTY.
+	origProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(origProfile)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := applyHighlight(tt.text, tt.terms)
@@ -133,12 +138,8 @@ func TestApplyHighlight(t *testing.T) {
 			if stripped != tt.wantText {
 				t.Errorf("text content mismatch:\n  got:  %q\n  want: %q", stripped, tt.wantText)
 			}
-			// Verify highlighting modified output when a match is expected.
-			// lipgloss may not produce ANSI in non-TTY environments, so log rather than fail.
 			if tt.wantHas != "" {
-				if result == tt.text {
-					t.Skip("lipgloss did not produce styled output (expected in non-TTY environments)")
-				} else if !strings.Contains(result, tt.wantHas) {
+				if !strings.Contains(result, tt.wantHas) {
 					t.Errorf("expected raw output to contain %q, got %q", tt.wantHas, result)
 				}
 			}
