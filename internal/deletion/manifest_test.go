@@ -29,6 +29,77 @@ func createTestManifest(t *testing.T, mgr *Manager, desc string) *Manifest {
 	return m
 }
 
+// newTestManifest creates a Manifest with sensible defaults for testing.
+// If no IDs are provided, defaults to {"id1", "id2"}.
+func newTestManifest(t *testing.T, desc string, ids ...string) *Manifest {
+	t.Helper()
+	if len(ids) == 0 {
+		ids = []string{"id1", "id2"}
+	}
+	return NewManifest(desc, ids)
+}
+
+// testSummary creates a Summary with common defaults for testing.
+func testSummary(count int, sizeBytes int64, dateRange [2]string, topSenders []SenderCount) *Summary {
+	return &Summary{
+		MessageCount:   count,
+		TotalSizeBytes: sizeBytes,
+		DateRange:      dateRange,
+		TopSenders:     topSenders,
+	}
+}
+
+// testExecution creates an Execution with the given parameters for testing.
+func testExecution(method Method, succeeded, failed int, completedAt *time.Time) *Execution {
+	return &Execution{
+		StartedAt:   time.Now().Add(-time.Hour),
+		CompletedAt: completedAt,
+		Method:      method,
+		Succeeded:   succeeded,
+		Failed:      failed,
+	}
+}
+
+// assertSummaryContains checks that summary contains all specified substrings.
+func assertSummaryContains(t *testing.T, summary string, parts ...string) {
+	t.Helper()
+	for _, part := range parts {
+		if !strings.Contains(summary, part) {
+			t.Errorf("summary missing %q", part)
+		}
+	}
+}
+
+// assertSummaryNotContains checks that summary does not contain any of the specified substrings.
+func assertSummaryNotContains(t *testing.T, summary string, parts ...string) {
+	t.Helper()
+	for _, part := range parts {
+		if strings.Contains(summary, part) {
+			t.Errorf("summary should not contain %q", part)
+		}
+	}
+}
+
+// assertListCount calls a list function and asserts the returned slice length.
+func assertListCount(t *testing.T, listFn func() ([]*Manifest, error), want int) {
+	t.Helper()
+	got, err := listFn()
+	if err != nil {
+		t.Fatalf("list error = %v", err)
+	}
+	if len(got) != want {
+		t.Fatalf("list returned %d manifests, want %d", len(got), want)
+	}
+}
+
+// writeFile is a test helper that writes content to path, failing the test on error.
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
 func TestSanitizeForFilename(t *testing.T) {
 	tests := []struct {
 		input string
@@ -112,19 +183,14 @@ func TestManifest_SaveAndLoad(t *testing.T) {
 	path := filepath.Join(tmpDir, "test-manifest.json")
 
 	// Create and save manifest
-	m := NewManifest("save test", []string{"id1", "id2"})
+	m := newTestManifest(t, "save test")
 	m.Filters = Filters{
 		Senders: []string{"test@example.com"},
 		After:   "2024-01-01",
 	}
-	m.Summary = &Summary{
-		MessageCount:   2,
-		TotalSizeBytes: 1024,
-		DateRange:      [2]string{"2024-01-01", "2024-01-15"},
-		TopSenders: []SenderCount{
-			{Sender: "test@example.com", Count: 2},
-		},
-	}
+	m.Summary = testSummary(2, 1024, [2]string{"2024-01-01", "2024-01-15"}, []SenderCount{
+		{Sender: "test@example.com", Count: 2},
+	})
 
 	if err := m.Save(path); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -157,7 +223,7 @@ func TestManifest_Save_CreatesDirectories(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "subdir", "nested", "manifest.json")
 
-	m := NewManifest("nested test", []string{"id1"})
+	m := newTestManifest(t, "nested test", "id1")
 	if err := m.Save(path); err != nil {
 		t.Fatalf("Save() with nested path error = %v", err)
 	}
@@ -178,9 +244,7 @@ func TestLoadManifest_NotFound(t *testing.T) {
 func TestLoadManifest_InvalidJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "invalid.json")
-	if err := os.WriteFile(path, []byte("not valid json"), 0644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
+	writeFile(t, path, "not valid json")
 
 	_, err := LoadManifest(path)
 	if err == nil {
@@ -189,68 +253,25 @@ func TestLoadManifest_InvalidJSON(t *testing.T) {
 }
 
 func TestManifest_FormatSummary(t *testing.T) {
-	m := NewManifest("format test", []string{"id1", "id2", "id3"})
-	m.Summary = &Summary{
-		MessageCount:   3,
-		TotalSizeBytes: 5 * 1024 * 1024, // 5 MB
-		DateRange:      [2]string{"2024-01-01", "2024-01-31"},
-		TopSenders: []SenderCount{
-			{Sender: "alice@example.com", Count: 2},
-			{Sender: "bob@example.com", Count: 1},
-		},
-	}
+	m := newTestManifest(t, "format test", "id1", "id2", "id3")
+	m.Summary = testSummary(3, 5*1024*1024, [2]string{"2024-01-01", "2024-01-31"}, []SenderCount{
+		{Sender: "alice@example.com", Count: 2},
+		{Sender: "bob@example.com", Count: 1},
+	})
 
 	summary := m.FormatSummary()
 
-	// Check that key fields are present
-	if !strings.Contains(summary, m.ID) {
-		t.Error("FormatSummary() missing ID")
-	}
-	if !strings.Contains(summary, "pending") {
-		t.Error("FormatSummary() missing status")
-	}
-	if !strings.Contains(summary, "Messages: 3") {
-		t.Error("FormatSummary() missing message count")
-	}
-	if !strings.Contains(summary, "5.00 MB") {
-		t.Error("FormatSummary() missing size")
-	}
-	if !strings.Contains(summary, "2024-01-01") {
-		t.Error("FormatSummary() missing date range")
-	}
-	if !strings.Contains(summary, "alice@example.com") {
-		t.Error("FormatSummary() missing top sender")
-	}
+	assertSummaryContains(t, summary, m.ID, "pending", "Messages: 3", "5.00 MB", "2024-01-01", "alice@example.com")
 }
 
 func TestManifest_FormatSummary_WithExecution(t *testing.T) {
-	m := NewManifest("exec test", []string{"id1"})
+	m := newTestManifest(t, "exec test", "id1")
 	now := time.Now()
-	m.Execution = &Execution{
-		StartedAt:   now.Add(-time.Hour),
-		CompletedAt: &now,
-		Method:      MethodTrash,
-		Succeeded:   10,
-		Failed:      2,
-	}
+	m.Execution = testExecution(MethodTrash, 10, 2, &now)
 
 	summary := m.FormatSummary()
 
-	if !strings.Contains(summary, "Execution:") {
-		t.Error("FormatSummary() missing Execution section")
-	}
-	if !strings.Contains(summary, "Method: trash") {
-		t.Error("FormatSummary() missing method")
-	}
-	if !strings.Contains(summary, "Succeeded: 10") {
-		t.Error("FormatSummary() missing succeeded count")
-	}
-	if !strings.Contains(summary, "Failed: 2") {
-		t.Error("FormatSummary() missing failed count")
-	}
-	if !strings.Contains(summary, "Completed:") {
-		t.Error("FormatSummary() missing completed timestamp")
-	}
+	assertSummaryContains(t, summary, "Execution:", "Method: trash", "Succeeded: 10", "Failed: 2", "Completed:")
 }
 
 func TestNewManager(t *testing.T) {
@@ -298,12 +319,10 @@ func TestManager_CreateAndListManifests(t *testing.T) {
 	m2 := createTestManifest(t, mgr, "second batch")
 
 	// List pending should return both
+	assertListCount(t, mgr.ListPending, 2)
 	pending, err := mgr.ListPending()
 	if err != nil {
 		t.Fatalf("ListPending() error = %v", err)
-	}
-	if len(pending) != 2 {
-		t.Fatalf("ListPending() returned %d manifests, want 2", len(pending))
 	}
 
 	// Verify both manifests are present
@@ -371,35 +390,17 @@ func TestManager_MoveManifest(t *testing.T) {
 	}
 
 	// Verify it's in in_progress
-	inProgress, err := mgr.ListInProgress()
-	if err != nil {
-		t.Fatalf("ListInProgress() error = %v", err)
-	}
-	if len(inProgress) != 1 {
-		t.Errorf("ListInProgress() returned %d, want 1", len(inProgress))
-	}
+	assertListCount(t, mgr.ListInProgress, 1)
 
 	// Verify it's not in pending
-	pending, err := mgr.ListPending()
-	if err != nil {
-		t.Fatalf("ListPending() error = %v", err)
-	}
-	if len(pending) != 0 {
-		t.Errorf("ListPending() returned %d, want 0", len(pending))
-	}
+	assertListCount(t, mgr.ListPending, 0)
 
 	// Move in_progress -> completed
 	if err := mgr.MoveManifest(m.ID, StatusInProgress, StatusCompleted); err != nil {
 		t.Fatalf("MoveManifest(in_progress->completed) error = %v", err)
 	}
 
-	completed, err := mgr.ListCompleted()
-	if err != nil {
-		t.Fatalf("ListCompleted() error = %v", err)
-	}
-	if len(completed) != 1 {
-		t.Errorf("ListCompleted() returned %d, want 1", len(completed))
-	}
+	assertListCount(t, mgr.ListCompleted, 1)
 }
 
 func TestManager_MoveManifest_ToFailed(t *testing.T) {
@@ -415,13 +416,7 @@ func TestManager_MoveManifest_ToFailed(t *testing.T) {
 		t.Fatalf("MoveManifest(in_progress->failed) error = %v", err)
 	}
 
-	failed, err := mgr.ListFailed()
-	if err != nil {
-		t.Fatalf("ListFailed() error = %v", err)
-	}
-	if len(failed) != 1 {
-		t.Errorf("ListFailed() returned %d, want 1", len(failed))
-	}
+	assertListCount(t, mgr.ListFailed, 1)
 }
 
 func TestManager_MoveManifest_InvalidTransitions(t *testing.T) {
@@ -451,13 +446,7 @@ func TestManager_CancelManifest(t *testing.T) {
 	}
 
 	// Should be gone
-	pending, err := mgr.ListPending()
-	if err != nil {
-		t.Fatalf("ListPending() error = %v", err)
-	}
-	if len(pending) != 0 {
-		t.Errorf("ListPending() after cancel returned %d, want 0", len(pending))
-	}
+	assertListCount(t, mgr.ListPending, 0)
 }
 
 func TestManager_SaveManifest(t *testing.T) {
@@ -491,16 +480,10 @@ func TestManager_ListManifests_SkipsInvalidFiles(t *testing.T) {
 	createTestManifest(t, mgr, "valid")
 
 	// Add an invalid JSON file
-	invalidPath := filepath.Join(mgr.PendingDir(), "invalid.json")
-	if err := os.WriteFile(invalidPath, []byte("not json"), 0644); err != nil {
-		t.Fatalf("WriteFile(invalid.json) error = %v", err)
-	}
+	writeFile(t, filepath.Join(mgr.PendingDir(), "invalid.json"), "not json")
 
 	// Add a non-JSON file
-	textPath := filepath.Join(mgr.PendingDir(), "readme.txt")
-	if err := os.WriteFile(textPath, []byte("readme"), 0644); err != nil {
-		t.Fatalf("WriteFile(readme.txt) error = %v", err)
-	}
+	writeFile(t, filepath.Join(mgr.PendingDir(), "readme.txt"), "readme")
 
 	// Add a directory
 	dirPath := filepath.Join(mgr.PendingDir(), "subdir.json")
@@ -509,13 +492,7 @@ func TestManager_ListManifests_SkipsInvalidFiles(t *testing.T) {
 	}
 
 	// ListPending should only return the valid manifest
-	pending, err := mgr.ListPending()
-	if err != nil {
-		t.Fatalf("ListPending() error = %v", err)
-	}
-	if len(pending) != 1 {
-		t.Errorf("ListPending() returned %d, want 1 (should skip invalid files)", len(pending))
-	}
+	assertListCount(t, mgr.ListPending, 1)
 }
 
 func TestStatus_Values(t *testing.T) {
@@ -548,40 +525,28 @@ func TestMethod_Values(t *testing.T) {
 
 // TestManifest_FormatSummary_EmptyDateRange tests FormatSummary with empty date range.
 func TestManifest_FormatSummary_EmptyDateRange(t *testing.T) {
-	m := NewManifest("empty date test", []string{"id1"})
-	m.Summary = &Summary{
-		MessageCount:   1,
-		TotalSizeBytes: 1024,
-		DateRange:      [2]string{"", ""}, // Empty date range
-	}
+	m := newTestManifest(t, "empty date test", "id1")
+	m.Summary = testSummary(1, 1024, [2]string{"", ""}, nil)
 
 	summary := m.FormatSummary()
 
-	// Should NOT contain "Date Range:" since dates are empty
-	if strings.Contains(summary, "Date Range:") {
-		t.Error("FormatSummary() should not include Date Range when dates are empty")
-	}
+	assertSummaryNotContains(t, summary, "Date Range:")
 }
 
 // TestManifest_FormatSummary_NoSummary tests FormatSummary with nil Summary.
 func TestManifest_FormatSummary_NoSummary(t *testing.T) {
-	m := NewManifest("no summary test", []string{"id1", "id2"})
+	m := newTestManifest(t, "no summary test")
 	m.Summary = nil
 
 	summary := m.FormatSummary()
 
-	// Should contain basic info but no summary details
-	if !strings.Contains(summary, "Messages: 2") {
-		t.Error("FormatSummary() should include message count")
-	}
-	if strings.Contains(summary, "Total Size:") {
-		t.Error("FormatSummary() should not include Total Size when Summary is nil")
-	}
+	assertSummaryContains(t, summary, "Messages: 2")
+	assertSummaryNotContains(t, summary, "Total Size:")
 }
 
 // TestManifest_FormatSummary_ManyTopSenders tests FormatSummary with >10 top senders.
 func TestManifest_FormatSummary_ManyTopSenders(t *testing.T) {
-	m := NewManifest("many senders test", []string{"id1"})
+	m := newTestManifest(t, "many senders test", "id1")
 
 	// Create 15 top senders
 	topSenders := make([]SenderCount, 15)
@@ -592,50 +557,24 @@ func TestManifest_FormatSummary_ManyTopSenders(t *testing.T) {
 		}
 	}
 
-	m.Summary = &Summary{
-		MessageCount:   15,
-		TotalSizeBytes: 1024,
-		DateRange:      [2]string{"2024-01-01", "2024-01-31"},
-		TopSenders:     topSenders,
-	}
+	m.Summary = testSummary(15, 1024, [2]string{"2024-01-01", "2024-01-31"}, topSenders)
 
 	summary := m.FormatSummary()
 
 	// Should only include first 10 senders
-	if !strings.Contains(summary, "sendera@example.com") {
-		t.Error("FormatSummary() should include first sender")
-	}
-	if !strings.Contains(summary, "senderj@example.com") {
-		t.Error("FormatSummary() should include 10th sender")
-	}
-	if strings.Contains(summary, "senderk@example.com") {
-		t.Error("FormatSummary() should NOT include 11th sender (limit is 10)")
-	}
+	assertSummaryContains(t, summary, "sendera@example.com", "senderj@example.com")
+	assertSummaryNotContains(t, summary, "senderk@example.com")
 }
 
 // TestManifest_FormatSummary_ExecutionNoCompletedAt tests execution without completion time.
 func TestManifest_FormatSummary_ExecutionNoCompletedAt(t *testing.T) {
-	m := NewManifest("no completed test", []string{"id1"})
-	m.Execution = &Execution{
-		StartedAt:   time.Now(),
-		CompletedAt: nil, // Not completed yet
-		Method:      MethodDelete,
-		Succeeded:   5,
-		Failed:      0,
-	}
+	m := newTestManifest(t, "no completed test", "id1")
+	m.Execution = testExecution(MethodDelete, 5, 0, nil)
 
 	summary := m.FormatSummary()
 
-	// Should have execution section but no completed timestamp
-	if !strings.Contains(summary, "Execution:") {
-		t.Error("FormatSummary() should include Execution section")
-	}
-	if !strings.Contains(summary, "Method: delete") {
-		t.Error("FormatSummary() should include method")
-	}
-	if strings.Contains(summary, "Completed:") {
-		t.Error("FormatSummary() should NOT include Completed when CompletedAt is nil")
-	}
+	assertSummaryContains(t, summary, "Execution:", "Method: delete")
+	assertSummaryNotContains(t, summary, "Completed:")
 }
 
 // TestManager_SaveManifest_UnknownStatus tests saving with an unknown status.
@@ -670,11 +609,5 @@ func TestManager_ListManifests_NonexistentDir(t *testing.T) {
 	}
 
 	// ListPending should return empty (not error) for nonexistent dir
-	pending, err := mgr.ListPending()
-	if err != nil {
-		t.Fatalf("ListPending() error = %v", err)
-	}
-	if len(pending) != 0 {
-		t.Errorf("ListPending() for nonexistent dir = %d, want 0", len(pending))
-	}
+	assertListCount(t, mgr.ListPending, 0)
 }
