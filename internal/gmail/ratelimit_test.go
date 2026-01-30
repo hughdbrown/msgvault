@@ -34,6 +34,30 @@ func getThrottledUntil(rl *RateLimiter) time.Time {
 	return rl.throttledUntil
 }
 
+// assertRefillRate checks that the limiter's refill rate matches the expected value.
+func assertRefillRate(t *testing.T, rl *RateLimiter, want float64, msg string) {
+	t.Helper()
+	got := getRefillRate(rl)
+	if got != want {
+		t.Errorf("%s: refillRate = %v, want %v", msg, got, want)
+	}
+}
+
+// assertElapsedAtLeast checks that elapsed time meets a minimum threshold.
+func assertElapsedAtLeast(t *testing.T, elapsed, min time.Duration, label string) {
+	t.Helper()
+	if elapsed < min {
+		t.Errorf("%s: elapsed = %v, expected >= %v", label, elapsed, min)
+	}
+}
+
+// measureElapsed returns the wall-clock duration of calling fn.
+func measureElapsed(fn func()) time.Duration {
+	start := time.Now()
+	fn()
+	return time.Since(start)
+}
+
 func TestOperationCost(t *testing.T) {
 	tests := []struct {
 		op   Operation
@@ -176,10 +200,7 @@ func TestRateLimiter_Acquire_ContextTimeout(t *testing.T) {
 
 	// Should have waited at least the timeout duration (with small slack for scheduling)
 	// (no upper bound assertion to avoid flaky tests under CI load)
-	minExpected := timeout - 5*time.Millisecond
-	if elapsed < minExpected {
-		t.Errorf("Acquire() elapsed = %v, expected >= %v", elapsed, minExpected)
-	}
+	assertElapsedAtLeast(t, elapsed, timeout-5*time.Millisecond, "Acquire() with timeout")
 }
 
 func TestRateLimiter_Refill(t *testing.T) {
@@ -304,19 +325,12 @@ func TestRateLimiter_RecoverRate(t *testing.T) {
 	rl.Throttle(10 * time.Millisecond)
 
 	// Check rate was reduced
-	reducedRate := getRefillRate(rl)
-	expectedReduced := DefaultRefillRate * 0.5
-	if reducedRate != expectedReduced {
-		t.Errorf("refillRate after Throttle = %v, want %v", reducedRate, expectedReduced)
-	}
+	assertRefillRate(t, rl, DefaultRefillRate*0.5, "after Throttle")
 
 	// Recover the rate
 	rl.RecoverRate()
 
-	recoveredRate := getRefillRate(rl)
-	if recoveredRate != DefaultRefillRate {
-		t.Errorf("refillRate after RecoverRate = %v, want %v", recoveredRate, DefaultRefillRate)
-	}
+	assertRefillRate(t, rl, DefaultRefillRate, "after RecoverRate")
 }
 
 func TestRateLimiter_Throttle_DoesNotShortenBackoff(t *testing.T) {
@@ -367,10 +381,7 @@ func TestRateLimiter_AutoRecoverRate(t *testing.T) {
 	rl.Throttle(50 * time.Millisecond)
 
 	// Verify rate is reduced
-	reducedRate := getRefillRate(rl)
-	if reducedRate != DefaultRefillRate*0.5 {
-		t.Errorf("refillRate after Throttle = %v, want %v", reducedRate, DefaultRefillRate*0.5)
-	}
+	assertRefillRate(t, rl, DefaultRefillRate*0.5, "after Throttle")
 
 	// Wait for throttle to expire (use generous margin for CI stability)
 	time.Sleep(100 * time.Millisecond)
@@ -379,10 +390,7 @@ func TestRateLimiter_AutoRecoverRate(t *testing.T) {
 	rl.Available()
 
 	// Verify rate is restored
-	recoveredRate := getRefillRate(rl)
-	if recoveredRate != DefaultRefillRate {
-		t.Errorf("refillRate after throttle expiry = %v, want %v", recoveredRate, DefaultRefillRate)
-	}
+	assertRefillRate(t, rl, DefaultRefillRate, "after throttle expiry")
 }
 
 func TestRateLimiter_Acquire_WaitsForThrottle(t *testing.T) {
@@ -404,8 +412,5 @@ func TestRateLimiter_Acquire_WaitsForThrottle(t *testing.T) {
 	}
 
 	// Should have waited at least the throttle duration (with some tolerance)
-	minExpected := throttleDuration - 20*time.Millisecond
-	if elapsed < minExpected {
-		t.Errorf("Acquire() elapsed = %v, expected >= %v (throttle wait)", elapsed, minExpected)
-	}
+	assertElapsedAtLeast(t, elapsed, throttleDuration-20*time.Millisecond, "Acquire() throttle wait")
 }
