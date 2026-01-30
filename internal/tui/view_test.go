@@ -61,24 +61,28 @@ func TestApplyHighlight(t *testing.T) {
 			text:     "hello world foo",
 			terms:    []string{"hello", "foo"},
 			wantText: "hello world foo",
+			wantHas:  "\x1b[",
 		},
 		{
 			name:     "overlapping matches",
 			text:     "abcdef",
 			terms:    []string{"abcd", "cdef"},
 			wantText: "abcdef",
+			wantHas:  "\x1b[",
 		},
 		{
 			name:     "adjacent matches",
 			text:     "aabb",
 			terms:    []string{"aa", "bb"},
 			wantText: "aabb",
+			wantHas:  "\x1b[",
 		},
 		{
 			name:     "nested matches",
 			text:     "abcdef",
 			terms:    []string{"abcdef", "cd"},
 			wantText: "abcdef",
+			wantHas:  "\x1b[",
 		},
 		{
 			name:     "no match",
@@ -98,6 +102,7 @@ func TestApplyHighlight(t *testing.T) {
 			text:     "Ünïcödé",
 			terms:    []string{"ünïcödé"},
 			wantText: "Ünïcödé",
+			wantHas:  "\x1b[",
 		},
 		{
 			name:     "empty text",
@@ -123,6 +128,7 @@ func TestApplyHighlight(t *testing.T) {
 			text:     "ababab",
 			terms:    []string{"ab"},
 			wantText: "ababab",
+			wantHas:  "\x1b[",
 		},
 	}
 
