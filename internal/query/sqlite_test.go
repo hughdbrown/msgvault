@@ -86,23 +86,22 @@ type aggExpectation struct {
 	Count int64
 }
 
-// assertAggRows verifies that aggregate rows contain the expected key/count pairs.
-// It checks both the total number of rows and that each expectation is found.
+// assertAggRows verifies that aggregate rows contain the expected key/count pairs
+// in the exact order given. This ensures both correctness and default sort behavior.
 func assertAggRows(t *testing.T, rows []AggregateRow, want []aggExpectation) {
 	t.Helper()
 	if len(rows) != len(want) {
 		t.Errorf("expected %d aggregate rows, got %d", len(want), len(rows))
 	}
-	rowMap := make(map[string]int64, len(rows))
-	for _, r := range rows {
-		rowMap[r.Key] = r.Count
-	}
-	for _, w := range want {
-		got, ok := rowMap[w.Key]
-		if !ok {
-			t.Errorf("expected aggregate row with key %q, not found", w.Key)
-		} else if got != w.Count {
-			t.Errorf("key %q: expected count %d, got %d", w.Key, w.Count, got)
+	for i := range want {
+		if i >= len(rows) {
+			break
+		}
+		if rows[i].Key != want[i].Key {
+			t.Errorf("row[%d]: expected key %q, got %q", i, want[i].Key, rows[i].Key)
+		}
+		if rows[i].Count != want[i].Count {
+			t.Errorf("row[%d] (key %q): expected count %d, got %d", i, rows[i].Key, want[i].Count, rows[i].Count)
 		}
 	}
 }
