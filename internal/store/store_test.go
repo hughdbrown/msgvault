@@ -13,6 +13,8 @@ import (
 
 // Helper functions
 
+var sampleRawMessage = []byte("From: test@example.com\r\nSubject: Test\r\n\r\nBody")
+
 func setupStore(t *testing.T) (*store.Store, *store.Source, int64) {
 	t.Helper()
 	st := testutil.NewTestStore(t)
@@ -43,6 +45,71 @@ func createMessages(t *testing.T, st *store.Store, sourceID, convID int64, count
 		ids = append(ids, createMessage(t, st, sourceID, convID, fmt.Sprintf("msg-%d", i)))
 	}
 	return ids
+}
+
+func mustEnsureLabels(t *testing.T, st *store.Store, sourceID int64, labels map[string]string, typ string) map[string]int64 {
+	t.Helper()
+	result := make(map[string]int64, len(labels))
+	for sourceLabelID, name := range labels {
+		lid, err := st.EnsureLabel(sourceID, sourceLabelID, name, typ)
+		testutil.MustNoErr(t, err, "EnsureLabel "+sourceLabelID)
+		result[sourceLabelID] = lid
+	}
+	return result
+}
+
+func assertMessageLabelsCount(t *testing.T, st *store.Store, msgID int64, want int) {
+	t.Helper()
+	var count int
+	err := st.DB().QueryRow(st.Rebind("SELECT COUNT(*) FROM message_labels WHERE message_id = ?"), msgID).Scan(&count)
+	testutil.MustNoErr(t, err, "count message_labels")
+	if count != want {
+		t.Errorf("message_labels count = %d, want %d", count, want)
+	}
+}
+
+func assertRecipientsCount(t *testing.T, st *store.Store, msgID int64, typ string, want int) {
+	t.Helper()
+	var count int
+	err := st.DB().QueryRow(st.Rebind("SELECT COUNT(*) FROM message_recipients WHERE message_id = ? AND recipient_type = ?"), msgID, typ).Scan(&count)
+	testutil.MustNoErr(t, err, "count message_recipients")
+	if count != want {
+		t.Errorf("message_recipients(%s) count = %d, want %d", typ, count, want)
+	}
+}
+
+func startSync(t *testing.T, st *store.Store, sourceID int64) int64 {
+	t.Helper()
+	syncID, err := st.StartSync(sourceID, "full")
+	testutil.MustNoErr(t, err, "StartSync")
+	if syncID == 0 {
+		t.Fatal("sync ID should be non-zero")
+	}
+	return syncID
+}
+
+func assertActiveSync(t *testing.T, st *store.Store, sourceID int64, wantID int64, wantStatus string) {
+	t.Helper()
+	active, err := st.GetActiveSync(sourceID)
+	testutil.MustNoErr(t, err, "GetActiveSync")
+	if active == nil {
+		t.Fatal("expected active sync, got nil")
+	}
+	if active.ID != wantID {
+		t.Errorf("active sync ID = %d, want %d", active.ID, wantID)
+	}
+	if active.Status != wantStatus {
+		t.Errorf("active sync status = %q, want %q", active.Status, wantStatus)
+	}
+}
+
+func assertNoActiveSync(t *testing.T, st *store.Store, sourceID int64) {
+	t.Helper()
+	active, err := st.GetActiveSync(sourceID)
+	testutil.MustNoErr(t, err, "GetActiveSync")
+	if active != nil {
+		t.Errorf("expected no active sync, got %+v", active)
+	}
 }
 
 func TestStore_Open(t *testing.T) {
@@ -224,10 +291,8 @@ st, source, convID := setupStore(t)
 
 	msgID := createMessage(t, st, source.ID, convID, "msg-1")
 
-	rawData := []byte("From: test@example.com\r\nSubject: Test\r\n\r\nBody")
-
 	// Store raw data
-	err := st.UpsertMessageRaw(msgID, rawData)
+	err := st.UpsertMessageRaw(msgID, sampleRawMessage)
 	if err != nil {
 		t.Fatalf("UpsertMessageRaw() error = %v", err)
 	}
@@ -238,8 +303,8 @@ st, source, convID := setupStore(t)
 		t.Fatalf("GetMessageRaw() error = %v", err)
 	}
 
-	if string(retrieved) != string(rawData) {
-		t.Errorf("retrieved data = %q, want %q", retrieved, rawData)
+	if string(retrieved) != string(sampleRawMessage) {
+		t.Errorf("retrieved data = %q, want %q", retrieved, sampleRawMessage)
 	}
 }
 
@@ -350,46 +415,34 @@ st, source, convID := setupStore(t)
 
 	msgID := createMessage(t, st, source.ID, convID, "msg-1")
 
-	lid1, err := st.EnsureLabel(source.ID, "INBOX", "Inbox", "system")
-	testutil.MustNoErr(t, err, "EnsureLabel INBOX")
-	lid2, err := st.EnsureLabel(source.ID, "STARRED", "Starred", "system")
-	testutil.MustNoErr(t, err, "EnsureLabel STARRED")
+	labels := mustEnsureLabels(t, st, source.ID, map[string]string{
+		"INBOX":   "Inbox",
+		"STARRED": "Starred",
+		"SENT":    "Sent",
+	}, "system")
 
 	// Set labels
-	err = st.ReplaceMessageLabels(msgID, []int64{lid1, lid2})
+	err := st.ReplaceMessageLabels(msgID, []int64{labels["INBOX"], labels["STARRED"]})
 	if err != nil {
 		t.Fatalf("ReplaceMessageLabels() error = %v", err)
 	}
 
-	// Verify labels were set (query message_labels directly)
-	var count int
-	err = st.DB().QueryRow(st.Rebind("SELECT COUNT(*) FROM message_labels WHERE message_id = ?"), msgID).Scan(&count)
-	testutil.MustNoErr(t, err, "count labels")
-	if count != 2 {
-		t.Errorf("label count = %d, want 2", count)
-	}
+	assertMessageLabelsCount(t, st, msgID, 2)
 
 	// Replace with different labels
-	lid3, err := st.EnsureLabel(source.ID, "SENT", "Sent", "system")
-	testutil.MustNoErr(t, err, "EnsureLabel SENT")
-	err = st.ReplaceMessageLabels(msgID, []int64{lid3})
+	err = st.ReplaceMessageLabels(msgID, []int64{labels["SENT"]})
 	if err != nil {
 		t.Fatalf("ReplaceMessageLabels() replace error = %v", err)
 	}
 
-	// Verify only new label remains
-	err = st.DB().QueryRow(st.Rebind("SELECT COUNT(*) FROM message_labels WHERE message_id = ?"), msgID).Scan(&count)
-	testutil.MustNoErr(t, err, "count labels after replace")
-	if count != 1 {
-		t.Errorf("label count after replace = %d, want 1", count)
-	}
+	assertMessageLabelsCount(t, st, msgID, 1)
 
 	// Verify it's the right label
 	var labelID int64
 	err = st.DB().QueryRow(st.Rebind("SELECT label_id FROM message_labels WHERE message_id = ?"), msgID).Scan(&labelID)
 	testutil.MustNoErr(t, err, "get label_id")
-	if labelID != lid3 {
-		t.Errorf("label_id = %d, want %d (SENT)", labelID, lid3)
+	if labelID != labels["SENT"] {
+		t.Errorf("label_id = %d, want %d (SENT)", labelID, labels["SENT"])
 	}
 }
 
@@ -410,13 +463,7 @@ st, source, convID := setupStore(t)
 		t.Fatalf("ReplaceMessageRecipients() error = %v", err)
 	}
 
-	// Verify recipients were set
-	var count int
-	err = st.DB().QueryRow(st.Rebind("SELECT COUNT(*) FROM message_recipients WHERE message_id = ? AND recipient_type = 'to'"), msgID).Scan(&count)
-	testutil.MustNoErr(t, err, "count recipients")
-	if count != 2 {
-		t.Errorf("recipient count = %d, want 2", count)
-	}
+	assertRecipientsCount(t, st, msgID, "to", 2)
 
 	// Replace recipients
 	err = st.ReplaceMessageRecipients(msgID, "to", []int64{pid1}, []string{"Alice"})
@@ -424,12 +471,7 @@ st, source, convID := setupStore(t)
 		t.Fatalf("ReplaceMessageRecipients() replace error = %v", err)
 	}
 
-	// Verify only one recipient remains
-	err = st.DB().QueryRow(st.Rebind("SELECT COUNT(*) FROM message_recipients WHERE message_id = ? AND recipient_type = 'to'"), msgID).Scan(&count)
-	testutil.MustNoErr(t, err, "count recipients after replace")
-	if count != 1 {
-		t.Errorf("recipient count after replace = %d, want 1", count)
-	}
+	assertRecipientsCount(t, st, msgID, "to", 1)
 
 	// Verify it's the right recipient
 	var participantID int64
@@ -502,39 +544,15 @@ func TestStore_SyncRun(t *testing.T) {
 
 st, source, _ := setupStore(t)
 
-	// Start a sync
-	syncID, err := st.StartSync(source.ID, "full")
-	if err != nil {
-		t.Fatalf("StartSync() error = %v", err)
-	}
-
-	if syncID == 0 {
-		t.Error("sync ID should be non-zero")
-	}
-
-	// Get active sync
-	active, err := st.GetActiveSync(source.ID)
-	if err != nil {
-		t.Fatalf("GetActiveSync() error = %v", err)
-	}
-
-	if active == nil {
-		t.Fatal("expected active sync, got nil")
-	}
-	if active.ID != syncID {
-		t.Errorf("active sync ID = %d, want %d", active.ID, syncID)
-	}
-	if active.Status != "running" {
-		t.Errorf("status = %q, want %q", active.Status, "running")
-	}
+	syncID := startSync(t, st, source.ID)
+	assertActiveSync(t, st, source.ID, syncID, "running")
 }
 
 func TestStore_SyncCheckpoint(t *testing.T) {
 
 st, source, _ := setupStore(t)
 
-	syncID, err := st.StartSync(source.ID, "full")
-	testutil.MustNoErr(t, err, "StartSync")
+	syncID := startSync(t, st, source.ID)
 
 	cp := &store.Checkpoint{
 		PageToken:         "next-page-token",
@@ -544,7 +562,7 @@ st, source, _ := setupStore(t)
 		ErrorsCount:       2,
 	}
 
-	err = st.UpdateSyncCheckpoint(syncID, cp)
+	err := st.UpdateSyncCheckpoint(syncID, cp)
 	if err != nil {
 		t.Fatalf("UpdateSyncCheckpoint() error = %v", err)
 	}
@@ -564,20 +582,14 @@ func TestStore_SyncComplete(t *testing.T) {
 
 st, source, _ := setupStore(t)
 
-	syncID, err := st.StartSync(source.ID, "full")
-	testutil.MustNoErr(t, err, "StartSync")
+	syncID := startSync(t, st, source.ID)
 
-	err = st.CompleteSync(syncID, "history-12345")
+	err := st.CompleteSync(syncID, "history-12345")
 	if err != nil {
 		t.Fatalf("CompleteSync() error = %v", err)
 	}
 
-	// Active sync should be nil now
-	active, err := st.GetActiveSync(source.ID)
-	testutil.MustNoErr(t, err, "GetActiveSync")
-	if active != nil {
-		t.Errorf("expected no active sync after completion, got %+v", active)
-	}
+	assertNoActiveSync(t, st, source.ID)
 
 	// Should have a successful sync
 	lastSync, err := st.GetLastSuccessfulSync(source.ID)
@@ -596,20 +608,14 @@ func TestStore_SyncFail(t *testing.T) {
 
 st, source, _ := setupStore(t)
 
-	syncID, err := st.StartSync(source.ID, "full")
-	testutil.MustNoErr(t, err, "StartSync")
+	syncID := startSync(t, st, source.ID)
 
-	err = st.FailSync(syncID, "network error")
+	err := st.FailSync(syncID, "network error")
 	if err != nil {
 		t.Fatalf("FailSync() error = %v", err)
 	}
 
-	// Active sync should be nil now
-	active, err := st.GetActiveSync(source.ID)
-	testutil.MustNoErr(t, err, "GetActiveSync")
-	if active != nil {
-		t.Errorf("expected no active sync after failure, got %+v", active)
-	}
+	assertNoActiveSync(t, st, source.ID)
 
 	// Verify sync status is "failed" and error message is stored
 	var status, errorMsg string
@@ -762,22 +768,16 @@ st, source, convID := setupStore(t)
 
 	msgID := createMessage(t, st, source.ID, convID, "msg-labels")
 
-	lid1, err := st.EnsureLabel(source.ID, "INBOX", "Inbox", "system")
-	testutil.MustNoErr(t, err, "EnsureLabel INBOX")
-	lid2, err := st.EnsureLabel(source.ID, "STARRED", "Starred", "system")
-	testutil.MustNoErr(t, err, "EnsureLabel STARRED")
+	labels := mustEnsureLabels(t, st, source.ID, map[string]string{
+		"INBOX":   "Inbox",
+		"STARRED": "Starred",
+	}, "system")
 
 	// Add labels
-	err = st.ReplaceMessageLabels(msgID, []int64{lid1, lid2})
+	err := st.ReplaceMessageLabels(msgID, []int64{labels["INBOX"], labels["STARRED"]})
 	testutil.MustNoErr(t, err, "ReplaceMessageLabels")
 
-	// Verify labels were added
-	var count int
-	err = st.DB().QueryRow(st.Rebind("SELECT COUNT(*) FROM message_labels WHERE message_id = ?"), msgID).Scan(&count)
-	testutil.MustNoErr(t, err, "count labels")
-	if count != 2 {
-		t.Errorf("label count = %d, want 2", count)
-	}
+	assertMessageLabelsCount(t, st, msgID, 2)
 
 	// Replace with empty list (remove all labels)
 	err = st.ReplaceMessageLabels(msgID, []int64{})
@@ -785,12 +785,7 @@ st, source, convID := setupStore(t)
 		t.Fatalf("ReplaceMessageLabels(empty) error = %v", err)
 	}
 
-	// Verify all labels were removed
-	err = st.DB().QueryRow(st.Rebind("SELECT COUNT(*) FROM message_labels WHERE message_id = ?"), msgID).Scan(&count)
-	testutil.MustNoErr(t, err, "count labels after empty")
-	if count != 0 {
-		t.Errorf("label count after empty = %d, want 0", count)
-	}
+	assertMessageLabelsCount(t, st, msgID, 0)
 }
 
 func TestStore_ReplaceMessageRecipients_Empty(t *testing.T) {
@@ -806,13 +801,7 @@ st, source, convID := setupStore(t)
 	err = st.ReplaceMessageRecipients(msgID, "to", []int64{pid1}, []string{"Alice"})
 	testutil.MustNoErr(t, err, "ReplaceMessageRecipients")
 
-	// Verify recipient was added
-	var count int
-	err = st.DB().QueryRow(st.Rebind("SELECT COUNT(*) FROM message_recipients WHERE message_id = ? AND recipient_type = 'to'"), msgID).Scan(&count)
-	testutil.MustNoErr(t, err, "count recipients")
-	if count != 1 {
-		t.Errorf("recipient count = %d, want 1", count)
-	}
+	assertRecipientsCount(t, st, msgID, "to", 1)
 
 	// Replace with empty list
 	err = st.ReplaceMessageRecipients(msgID, "to", []int64{}, []string{})
@@ -820,26 +809,14 @@ st, source, convID := setupStore(t)
 		t.Fatalf("ReplaceMessageRecipients(empty) error = %v", err)
 	}
 
-	// Verify all recipients were removed
-	err = st.DB().QueryRow(st.Rebind("SELECT COUNT(*) FROM message_recipients WHERE message_id = ? AND recipient_type = 'to'"), msgID).Scan(&count)
-	testutil.MustNoErr(t, err, "count recipients after empty")
-	if count != 0 {
-		t.Errorf("recipient count after empty = %d, want 0", count)
-	}
+	assertRecipientsCount(t, st, msgID, "to", 0)
 }
 
 func TestStore_GetActiveSync_NoSync(t *testing.T) {
 
 st, source, _ := setupStore(t)
 
-	// No sync started yet
-	active, err := st.GetActiveSync(source.ID)
-	if err != nil {
-		t.Fatalf("GetActiveSync() error = %v", err)
-	}
-	if active != nil {
-		t.Errorf("expected nil active sync, got %+v", active)
-	}
+	assertNoActiveSync(t, st, source.ID)
 }
 
 func TestStore_GetLastSuccessfulSync_None(t *testing.T) {
@@ -940,14 +917,12 @@ st, source, convID := setupStore(t)
 	}
 
 	// Add messages, some with raw data
-	rawData := []byte("From: test@example.com\r\nSubject: Test\r\n\r\nBody")
-
 	for i := 0; i < 4; i++ {
 		msgID := createMessage(t, st, source.ID, convID, fmt.Sprintf("raw-count-msg-%d", i))
 
 		// Only store raw for first 2 messages
 		if i < 2 {
-			err = st.UpsertMessageRaw(msgID, rawData)
+			err = st.UpsertMessageRaw(msgID, sampleRawMessage)
 			testutil.MustNoErr(t, err, "UpsertMessageRaw")
 		}
 	}
