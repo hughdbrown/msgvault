@@ -32,6 +32,81 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 }
 
+// MustListMessages calls ListMessages and fails the test on error.
+func (e *testEnv) MustListMessages(filter MessageFilter) []MessageSummary {
+	e.T.Helper()
+	messages, err := e.Engine.ListMessages(e.Ctx, filter)
+	if err != nil {
+		e.T.Fatalf("ListMessages: %v", err)
+	}
+	return messages
+}
+
+// MustSearch calls Search and fails the test on error.
+func (e *testEnv) MustSearch(q *search.Query, limit, offset int) []MessageSummary {
+	e.T.Helper()
+	results, err := e.Engine.Search(e.Ctx, q, limit, offset)
+	if err != nil {
+		e.T.Fatalf("Search: %v", err)
+	}
+	return results
+}
+
+// MustGetTotalStats calls GetTotalStats and fails the test on error.
+func (e *testEnv) MustGetTotalStats(opts StatsOptions) *TotalStats {
+	e.T.Helper()
+	stats, err := e.Engine.GetTotalStats(e.Ctx, opts)
+	if err != nil {
+		e.T.Fatalf("GetTotalStats: %v", err)
+	}
+	return stats
+}
+
+// MarkDeletedByID marks a message as deleted by its internal ID.
+func (e *testEnv) MarkDeletedByID(id int64) {
+	e.T.Helper()
+	_, err := e.DB.Exec("UPDATE messages SET deleted_from_source_at = datetime('now') WHERE id = ?", id)
+	if err != nil {
+		e.T.Fatalf("mark deleted by id %d: %v", id, err)
+	}
+}
+
+// MarkDeletedBySourceID marks a message as deleted by its source message ID.
+func (e *testEnv) MarkDeletedBySourceID(sourceID string) {
+	e.T.Helper()
+	_, err := e.DB.Exec("UPDATE messages SET deleted_from_source_at = datetime('now') WHERE source_message_id = ?", sourceID)
+	if err != nil {
+		e.T.Fatalf("mark deleted by source id %s: %v", sourceID, err)
+	}
+}
+
+// aggExpectation describes an expected key/count pair in aggregate results.
+type aggExpectation struct {
+	Key   string
+	Count int64
+}
+
+// assertAggRows verifies that aggregate rows contain the expected key/count pairs.
+// It checks both the total number of rows and that each expectation is found.
+func assertAggRows(t *testing.T, rows []AggregateRow, want []aggExpectation) {
+	t.Helper()
+	if len(rows) != len(want) {
+		t.Errorf("expected %d aggregate rows, got %d", len(want), len(rows))
+	}
+	rowMap := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		rowMap[r.Key] = r.Count
+	}
+	for _, w := range want {
+		got, ok := rowMap[w.Key]
+		if !ok {
+			t.Errorf("expected aggregate row with key %q, not found", w.Key)
+		} else if got != w.Count {
+			t.Errorf("key %q: expected count %d, got %d", w.Key, w.Count, got)
+		}
+	}
+}
+
 // EnableFTS creates the FTS5 virtual table and rebuilds it.
 // Skips the test if FTS5 is not available in this SQLite build.
 func (e *testEnv) EnableFTS() {
@@ -219,24 +294,11 @@ func TestAggregateBySender(t *testing.T) {
 		t.Fatalf("AggregateBySender: %v", err)
 	}
 
-	if len(rows) != 2 {
-		t.Errorf("expected 2 senders, got %d", len(rows))
-	}
-
 	// Alice should have more messages (3) and be first with default sort (count desc)
-	if rows[0].Key != "alice@example.com" {
-		t.Errorf("expected alice first, got %s", rows[0].Key)
-	}
-	if rows[0].Count != 3 {
-		t.Errorf("expected alice count 3, got %d", rows[0].Count)
-	}
-
-	if rows[1].Key != "bob@company.org" {
-		t.Errorf("expected bob second, got %s", rows[1].Key)
-	}
-	if rows[1].Count != 2 {
-		t.Errorf("expected bob count 2, got %d", rows[1].Count)
-	}
+	assertAggRows(t, rows, []aggExpectation{
+		{"alice@example.com", 3},
+		{"bob@company.org", 2},
+	})
 }
 
 func TestAggregateByRecipient(t *testing.T) {
@@ -247,17 +309,11 @@ func TestAggregateByRecipient(t *testing.T) {
 		t.Fatalf("AggregateByRecipient: %v", err)
 	}
 
-	// Should have Bob (3 messages as recipient), Alice (2), Carol (1)
-	if len(rows) != 3 {
-		t.Errorf("expected 3 recipients, got %d", len(rows))
-	}
-
-	if rows[0].Key != "bob@company.org" {
-		t.Errorf("expected bob first, got %s", rows[0].Key)
-	}
-	if rows[0].Count != 3 {
-		t.Errorf("expected bob count 3, got %d", rows[0].Count)
-	}
+	assertAggRows(t, rows, []aggExpectation{
+		{"bob@company.org", 3},
+		{"alice@example.com", 2},
+		{"carol@example.com", 1},
+	})
 }
 
 func TestAggregateByDomain(t *testing.T) {
@@ -268,17 +324,10 @@ func TestAggregateByDomain(t *testing.T) {
 		t.Fatalf("AggregateByDomain: %v", err)
 	}
 
-	if len(rows) != 2 {
-		t.Errorf("expected 2 domains, got %d", len(rows))
-	}
-
-	// example.com has 3 messages from Alice
-	if rows[0].Key != "example.com" {
-		t.Errorf("expected example.com first, got %s", rows[0].Key)
-	}
-	if rows[0].Count != 3 {
-		t.Errorf("expected example.com count 3, got %d", rows[0].Count)
-	}
+	assertAggRows(t, rows, []aggExpectation{
+		{"example.com", 3},
+		{"company.org", 2},
+	})
 }
 
 func TestAggregateByLabel(t *testing.T) {
@@ -289,17 +338,11 @@ func TestAggregateByLabel(t *testing.T) {
 		t.Fatalf("AggregateByLabel: %v", err)
 	}
 
-	if len(rows) != 3 {
-		t.Errorf("expected 3 labels, got %d", len(rows))
-	}
-
-	// INBOX should have all 5 messages
-	if rows[0].Key != "INBOX" {
-		t.Errorf("expected INBOX first, got %s", rows[0].Key)
-	}
-	if rows[0].Count != 5 {
-		t.Errorf("expected INBOX count 5, got %d", rows[0].Count)
-	}
+	assertAggRows(t, rows, []aggExpectation{
+		{"INBOX", 5},
+		{"Work", 2},
+		{"IMPORTANT", 1},
+	})
 }
 
 func TestAggregateByTime(t *testing.T) {
@@ -362,31 +405,19 @@ func TestListMessages(t *testing.T) {
 	env := newTestEnv(t)
 
 	// List all messages
-	messages, err := env.Engine.ListMessages(env.Ctx, MessageFilter{})
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
-
+	messages := env.MustListMessages(MessageFilter{})
 	if len(messages) != 5 {
 		t.Errorf("expected 5 messages, got %d", len(messages))
 	}
 
 	// Filter by sender
-	messages, err = env.Engine.ListMessages(env.Ctx, MessageFilter{Sender: "alice@example.com"})
-	if err != nil {
-		t.Fatalf("ListMessages by sender: %v", err)
-	}
-
+	messages = env.MustListMessages(MessageFilter{Sender: "alice@example.com"})
 	if len(messages) != 3 {
 		t.Errorf("expected 3 messages from alice, got %d", len(messages))
 	}
 
 	// Filter by label
-	messages, err = env.Engine.ListMessages(env.Ctx, MessageFilter{Label: "Work"})
-	if err != nil {
-		t.Fatalf("ListMessages by label: %v", err)
-	}
-
+	messages = env.MustListMessages(MessageFilter{Label: "Work"})
 	if len(messages) != 2 {
 		t.Errorf("expected 2 messages with Work label, got %d", len(messages))
 	}
@@ -395,10 +426,7 @@ func TestListMessages(t *testing.T) {
 func TestListMessagesWithLabels(t *testing.T) {
 	env := newTestEnv(t)
 
-	messages, err := env.Engine.ListMessages(env.Ctx, MessageFilter{})
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
+	messages := env.MustListMessages(MessageFilter{})
 
 	// Message 1 should have INBOX and Work labels
 	msg1 := messages[len(messages)-1] // Oldest first with default sort
@@ -503,10 +531,7 @@ func TestListAccounts(t *testing.T) {
 func TestGetTotalStats(t *testing.T) {
 	env := newTestEnv(t)
 
-	stats, err := env.Engine.GetTotalStats(env.Ctx, StatsOptions{})
-	if err != nil {
-		t.Fatalf("GetTotalStats: %v", err)
-	}
+	stats := env.MustGetTotalStats(StatsOptions{})
 
 	if stats.MessageCount != 5 {
 		t.Errorf("expected 5 messages, got %d", stats.MessageCount)
@@ -530,11 +555,7 @@ func TestGetTotalStats(t *testing.T) {
 func TestDeletedMessagesIncludedWithFlag(t *testing.T) {
 	env := newTestEnv(t)
 
-	// Mark one message as deleted
-	_, err := env.DB.Exec("UPDATE messages SET deleted_from_source_at = datetime('now') WHERE id = 1")
-	if err != nil {
-		t.Fatalf("mark deleted: %v", err)
-	}
+	env.MarkDeletedByID(1)
 
 	// Aggregates should INCLUDE deleted messages (for TUI visibility)
 	rows, err := env.Engine.AggregateBySender(env.Ctx, DefaultAggregateOptions())
@@ -550,10 +571,7 @@ func TestDeletedMessagesIncludedWithFlag(t *testing.T) {
 	}
 
 	// ListMessages should INCLUDE deleted with DeletedAt field set
-	messages, err := env.Engine.ListMessages(env.Ctx, MessageFilter{})
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
+	messages := env.MustListMessages(MessageFilter{})
 
 	if len(messages) != 5 {
 		t.Errorf("expected 5 messages (including deleted), got %d", len(messages))
@@ -578,10 +596,7 @@ func TestDeletedMessagesIncludedWithFlag(t *testing.T) {
 	}
 
 	// Stats should INCLUDE deleted messages
-	stats, err := env.Engine.GetTotalStats(env.Ctx, StatsOptions{})
-	if err != nil {
-		t.Fatalf("GetTotalStats: %v", err)
-	}
+	stats := env.MustGetTotalStats(StatsOptions{})
 
 	if stats.MessageCount != 5 {
 		t.Errorf("expected 5 messages in stats (including deleted), got %d", stats.MessageCount)
@@ -626,11 +641,7 @@ func TestSortingOptions(t *testing.T) {
 func TestGetMessageIncludesDeleted(t *testing.T) {
 	env := newTestEnv(t)
 
-	// Mark message 1 as deleted
-	_, err := env.DB.Exec("UPDATE messages SET deleted_from_source_at = datetime('now') WHERE id = 1")
-	if err != nil {
-		t.Fatalf("mark deleted: %v", err)
-	}
+	env.MarkDeletedByID(1)
 
 	// GetMessage should RETURN deleted message (so user can still view it)
 	msg, err := env.Engine.GetMessage(env.Ctx, 1)
@@ -654,11 +665,7 @@ func TestGetMessageIncludesDeleted(t *testing.T) {
 func TestGetMessageBySourceIDIncludesDeleted(t *testing.T) {
 	env := newTestEnv(t)
 
-	// Mark message 3 (source_message_id = 'msg3') as deleted
-	_, err := env.DB.Exec("UPDATE messages SET deleted_from_source_at = datetime('now') WHERE source_message_id = 'msg3'")
-	if err != nil {
-		t.Fatalf("mark deleted: %v", err)
-	}
+	env.MarkDeletedBySourceID("msg3")
 
 	// GetMessageBySourceID should RETURN deleted message (so user can still view it)
 	msg, err := env.Engine.GetMessageBySourceID(env.Ctx, "msg3")
@@ -702,10 +709,7 @@ func TestGetTotalStatsWithSourceID(t *testing.T) {
 	}
 
 	// Stats for all accounts
-	allStats, err := env.Engine.GetTotalStats(env.Ctx, StatsOptions{})
-	if err != nil {
-		t.Fatalf("GetTotalStats (all): %v", err)
-	}
+	allStats := env.MustGetTotalStats(StatsOptions{})
 
 	if allStats.MessageCount != 6 {
 		t.Errorf("expected 6 total messages, got %d", allStats.MessageCount)
@@ -719,10 +723,7 @@ func TestGetTotalStatsWithSourceID(t *testing.T) {
 
 	// Stats for source 1 only
 	sourceID := int64(1)
-	source1Stats, err := env.Engine.GetTotalStats(env.Ctx, StatsOptions{SourceID: &sourceID})
-	if err != nil {
-		t.Fatalf("GetTotalStats (source 1): %v", err)
-	}
+	source1Stats := env.MustGetTotalStats(StatsOptions{SourceID: &sourceID})
 
 	if source1Stats.MessageCount != 5 {
 		t.Errorf("expected 5 messages for source 1, got %d", source1Stats.MessageCount)
@@ -740,10 +741,7 @@ func TestGetTotalStatsWithInvalidSourceID(t *testing.T) {
 
 	// Request stats for a non-existent source ID
 	nonExistentID := int64(9999)
-	stats, err := env.Engine.GetTotalStats(env.Ctx, StatsOptions{SourceID: &nonExistentID})
-	if err != nil {
-		t.Fatalf("GetTotalStats with invalid source: %v", err)
-	}
+	stats := env.MustGetTotalStats(StatsOptions{SourceID: &nonExistentID})
 
 	// All counts should be 0 for non-existent source
 	if stats.MessageCount != 0 {
@@ -820,19 +818,13 @@ func TestWithAttachmentsOnlyStats(t *testing.T) {
 	env := newTestEnv(t)
 
 	// Stats without filter
-	allStats, err := env.Engine.GetTotalStats(env.Ctx, StatsOptions{})
-	if err != nil {
-		t.Fatalf("GetTotalStats: %v", err)
-	}
+	allStats := env.MustGetTotalStats(StatsOptions{})
 	if allStats.MessageCount != 5 {
 		t.Errorf("expected 5 total messages, got %d", allStats.MessageCount)
 	}
 
 	// Stats with attachment filter
-	attStats, err := env.Engine.GetTotalStats(env.Ctx, StatsOptions{WithAttachmentsOnly: true})
-	if err != nil {
-		t.Fatalf("GetTotalStats with attachment filter: %v", err)
-	}
+	attStats := env.MustGetTotalStats(StatsOptions{WithAttachmentsOnly: true})
 
 	// Only 2 messages have attachments in setupTestDB
 	if attStats.MessageCount != 2 {
@@ -854,10 +846,7 @@ func TestListMessagesTimePeriodInference(t *testing.T) {
 		// TimeGranularity is zero (TimeYear) by default
 	}
 
-	messages, err := env.Engine.ListMessages(env.Ctx, filter)
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
+	messages := env.MustListMessages(filter)
 
 	// Should get messages from January 2024 (msg1, msg2)
 	if len(messages) != 2 {
@@ -865,32 +854,13 @@ func TestListMessagesTimePeriodInference(t *testing.T) {
 	}
 
 	// Test with day period
-	filter = MessageFilter{
-		TimePeriod: "2024-01-15",
-	}
-
-	messages, err = env.Engine.ListMessages(env.Ctx, filter)
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
-
-	// Should get only msg1 from 2024-01-15
+	messages = env.MustListMessages(MessageFilter{TimePeriod: "2024-01-15"})
 	if len(messages) != 1 {
 		t.Errorf("expected 1 message for 2024-01-15, got %d", len(messages))
 	}
 
 	// Test with year period - should match the explicit granularity
-	filter = MessageFilter{
-		TimePeriod:      "2024",
-		TimeGranularity: TimeYear,
-	}
-
-	messages, err = env.Engine.ListMessages(env.Ctx, filter)
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
-
-	// Should get all 5 messages from 2024
+	messages = env.MustListMessages(MessageFilter{TimePeriod: "2024", TimeGranularity: TimeYear})
 	if len(messages) != 5 {
 		t.Errorf("expected 5 messages for 2024, got %d", len(messages))
 	}
@@ -906,10 +876,7 @@ func TestSearch_WithoutFTS(t *testing.T) {
 		TextTerms: []string{"Hello"},
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Should find messages with "Hello" in subject
 	if len(results) != 2 {
@@ -924,10 +891,7 @@ func TestSearch_FromFilter(t *testing.T) {
 		FromAddrs: []string{"alice@example.com"},
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Alice sent 3 messages
 	if len(results) != 3 {
@@ -948,10 +912,7 @@ func TestSearch_LabelFilter(t *testing.T) {
 		Labels: []string{"Work"},
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// 2 messages have the Work label (msg1 and msg4)
 	if len(results) != 2 {
@@ -970,10 +931,7 @@ func TestSearch_DateRangeFilter(t *testing.T) {
 		BeforeDate: &before,
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Messages in February 2024 (msg3 and msg4)
 	if len(results) != 2 {
@@ -989,10 +947,7 @@ func TestSearch_HasAttachment(t *testing.T) {
 		HasAttachment: &hasAtt,
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// 2 messages have attachments (msg2 and msg4)
 	if len(results) != 2 {
@@ -1015,10 +970,7 @@ func TestSearch_CombinedFilters(t *testing.T) {
 		Labels:    []string{"Work"},
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Only msg1 is from Alice with Work label
 	if len(results) != 1 {
@@ -1034,10 +986,7 @@ func TestSearch_SizeFilter(t *testing.T) {
 		LargerThan: &largerThan,
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Only msg4 has size 3000 which is > 2500
 	if len(results) != 1 {
@@ -1057,10 +1006,7 @@ func TestSearch_EmptyQuery(t *testing.T) {
 	// Empty query - no text terms, no filters
 	q := &search.Query{}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search with empty query: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Should return all 5 messages from test data
 	if len(results) != 5 {
@@ -1145,10 +1091,7 @@ func TestSearch_WithFTS(t *testing.T) {
 		TextTerms: []string{"World"},
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search with FTS: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Should find msg1 with "Hello World" in subject
 	if len(results) != 1 {
@@ -1216,10 +1159,7 @@ func TestListMessages_MatchEmptySender(t *testing.T) {
 		MatchEmptySender: true,
 	}
 
-	messages, err := env.Engine.ListMessages(env.Ctx, filter)
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
+	messages := env.MustListMessages(filter)
 
 	// Should only find msg6 (no sender)
 	if len(messages) != 1 {
@@ -1239,10 +1179,7 @@ func TestListMessages_MatchEmptyRecipient(t *testing.T) {
 		MatchEmptyRecipient: true,
 	}
 
-	messages, err := env.Engine.ListMessages(env.Ctx, filter)
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
+	messages := env.MustListMessages(filter)
 
 	// Should find msg6 (no recipients since no to/cc/bcc) and msg7 (explicitly no recipients)
 	// msg6 has no sender AND no recipients, msg7 has a sender but no to/cc/bcc
@@ -1259,10 +1196,7 @@ func TestListMessages_MatchEmptyDomain(t *testing.T) {
 		MatchEmptyDomain: true,
 	}
 
-	messages, err := env.Engine.ListMessages(env.Ctx, filter)
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
+	messages := env.MustListMessages(filter)
 
 	// Should find msg6 (no sender, so no domain) and msg8 (sender with empty domain)
 	if len(messages) != 2 {
@@ -1278,10 +1212,7 @@ func TestListMessages_MatchEmptyLabel(t *testing.T) {
 		MatchEmptyLabel: true,
 	}
 
-	messages, err := env.Engine.ListMessages(env.Ctx, filter)
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
+	messages := env.MustListMessages(filter)
 
 	// Should find msg6, msg7, msg8, msg9 (the new messages have no labels)
 	if len(messages) != 4 {
@@ -1299,14 +1230,10 @@ func TestListMessages_MatchEmptyFiltersAreIndependent(t *testing.T) {
 
 	// Test 1: Combined filter - MatchEmptyLabel AND specific Sender
 	// Should find messages from alice that have no labels (msg7, msg9)
-	filter := MessageFilter{
+	messages := env.MustListMessages(MessageFilter{
 		MatchEmptyLabel: true,
 		Sender:          "alice@example.com",
-	}
-	messages, err := env.Engine.ListMessages(env.Ctx, filter)
-	if err != nil {
-		t.Fatalf("ListMessages with MatchEmptyLabel + Sender: %v", err)
-	}
+	})
 
 	// msg7 and msg9 are from alice and have no labels
 	if len(messages) != 2 {
@@ -1333,14 +1260,10 @@ func TestListMessages_MatchEmptyFiltersAreIndependent(t *testing.T) {
 	// Test 2: Multiple MatchEmpty flags create restrictive AND condition
 	// MatchEmptyLabel AND MatchEmptySender should find only messages with
 	// no labels AND no sender (only msg6)
-	filter = MessageFilter{
+	messages = env.MustListMessages(MessageFilter{
 		MatchEmptyLabel:  true,
 		MatchEmptySender: true,
-	}
-	messages, err = env.Engine.ListMessages(env.Ctx, filter)
-	if err != nil {
-		t.Fatalf("ListMessages with MatchEmptyLabel + MatchEmptySender: %v", err)
-	}
+	})
 
 	// Only msg6 has both no labels AND no sender
 	if len(messages) != 1 {
@@ -1352,13 +1275,7 @@ func TestListMessages_MatchEmptyFiltersAreIndependent(t *testing.T) {
 
 	// Test 3: MatchEmptyLabel alone should NOT restrict by sender
 	// (proving filters are independent - setting one doesn't affect others)
-	filter = MessageFilter{
-		MatchEmptyLabel: true,
-	}
-	messages, err = env.Engine.ListMessages(env.Ctx, filter)
-	if err != nil {
-		t.Fatalf("ListMessages with MatchEmptyLabel only: %v", err)
-	}
+	messages = env.MustListMessages(MessageFilter{MatchEmptyLabel: true})
 
 	// Should find all 4 messages with no labels (msg6, msg7, msg8, msg9)
 	if len(messages) != 4 {
@@ -1380,10 +1297,7 @@ func TestSearch_CaseInsensitiveFallback(t *testing.T) {
 		TextTerms: []string{"hello"},
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Should find messages with "Hello" in subject (case-insensitive)
 	if len(results) != 2 {
@@ -1395,10 +1309,7 @@ func TestSearch_CaseInsensitiveFallback(t *testing.T) {
 		TextTerms: []string{"WORLD"},
 	}
 
-	results, err = env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results = env.MustSearch(q, 100, 0)
 
 	if len(results) != 1 {
 		t.Errorf("expected 1 message with 'WORLD' (case-insensitive), got %d", len(results))
@@ -1423,10 +1334,7 @@ func TestSearch_SubjectTermsCaseInsensitive(t *testing.T) {
 		SubjectTerms: []string{"HELLO"},
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Should find messages with "Hello" in subject
 	if len(results) != 2 {
@@ -1537,10 +1445,7 @@ func TestSubAggregateIncludesDeletedMessages(t *testing.T) {
 	}
 
 	// Mark message 1 (alice's message) as deleted
-	_, err = env.DB.Exec("UPDATE messages SET deleted_from_source_at = datetime('now') WHERE id = 1")
-	if err != nil {
-		t.Fatalf("mark deleted: %v", err)
-	}
+	env.MarkDeletedByID(1)
 
 	resultsAfter, err := env.Engine.SubAggregate(env.Ctx, filter, ViewRecipients, DefaultAggregateOptions())
 	if err != nil {
@@ -1794,10 +1699,7 @@ func TestSearchWithDomainFilter(t *testing.T) {
 		FromAddrs: []string{"@example.com"},
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Test data has alice@example.com and bob@example.com as senders
 	// Should match messages from both
@@ -1821,10 +1723,7 @@ func TestSearchMixedExactAndDomainFilter(t *testing.T) {
 		FromAddrs: []string{"alice@example.com", "@other.com"},
 	}
 
-	results, err := env.Engine.Search(env.Ctx, q, 100, 0)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	results := env.MustSearch(q, 100, 0)
 
 	// Should match messages from alice@example.com OR anyone @other.com
 	// In test data, we have alice@example.com
@@ -1871,10 +1770,7 @@ func TestListMessages_ConversationIDFilter(t *testing.T) {
 		ConversationID: &convID1,
 	}
 
-	messages1, err := env.Engine.ListMessages(env.Ctx, filter1)
-	if err != nil {
-		t.Fatalf("ListMessages for conversation 1: %v", err)
-	}
+	messages1 := env.MustListMessages(filter1)
 
 	if len(messages1) != 5 {
 		t.Errorf("expected 5 messages in conversation 1, got %d", len(messages1))
@@ -1893,10 +1789,7 @@ func TestListMessages_ConversationIDFilter(t *testing.T) {
 		ConversationID: &convID2,
 	}
 
-	messages2, err := env.Engine.ListMessages(env.Ctx, filter2)
-	if err != nil {
-		t.Fatalf("ListMessages for conversation 2: %v", err)
-	}
+	messages2 := env.MustListMessages(filter2)
 
 	if len(messages2) != 2 {
 		t.Errorf("expected 2 messages in conversation 2, got %d", len(messages2))
@@ -1916,10 +1809,7 @@ func TestListMessages_ConversationIDFilter(t *testing.T) {
 		SortDirection:  SortAsc,
 	}
 
-	messagesAsc, err := env.Engine.ListMessages(env.Ctx, filter2Asc)
-	if err != nil {
-		t.Fatalf("ListMessages with asc sort: %v", err)
-	}
+	messagesAsc := env.MustListMessages(filter2Asc)
 
 	if len(messagesAsc) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(messagesAsc))
