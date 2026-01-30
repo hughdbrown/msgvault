@@ -51,13 +51,6 @@ func assertElapsedAtLeast(t *testing.T, elapsed, min time.Duration, label string
 	}
 }
 
-// measureElapsed returns the wall-clock duration of calling fn.
-func measureElapsed(fn func()) time.Duration {
-	start := time.Now()
-	fn()
-	return time.Since(start)
-}
-
 func TestOperationCost(t *testing.T) {
 	tests := []struct {
 		op   Operation
