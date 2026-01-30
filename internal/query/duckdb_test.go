@@ -11,6 +11,139 @@ import (
 	"github.com/wesm/msgvault/internal/search"
 )
 
+// newParquetEngine creates a DuckDBEngine backed by the standard Parquet test data.
+// It registers cleanup via t.Cleanup so callers don't need defer.
+func newParquetEngine(t *testing.T) *DuckDBEngine {
+	t.Helper()
+	analyticsDir, cleanup := setupTestParquet(t)
+	t.Cleanup(cleanup)
+	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
+	if err != nil {
+		t.Fatalf("NewDuckDBEngine: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	return engine
+}
+
+// newEmptyBucketsEngine creates a DuckDBEngine backed by Parquet test data
+// that includes messages with empty senders, recipients, domains, and labels.
+func newEmptyBucketsEngine(t *testing.T) *DuckDBEngine {
+	t.Helper()
+	analyticsDir, cleanup := setupTestParquetWithEmptyBuckets(t)
+	t.Cleanup(cleanup)
+	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
+	if err != nil {
+		t.Fatalf("NewDuckDBEngine: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	return engine
+}
+
+// newSQLiteEngine creates a DuckDBEngine backed by the standard SQLite test data.
+func newSQLiteEngine(t *testing.T) *DuckDBEngine {
+	t.Helper()
+	sqliteDB := setupTestDB(t)
+	t.Cleanup(func() { sqliteDB.Close() })
+	engine, err := NewDuckDBEngine("", "", sqliteDB)
+	if err != nil {
+		t.Fatalf("NewDuckDBEngine: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	return engine
+}
+
+// searchFast is a test helper that parses a query string and calls SearchFast.
+func searchFast(t *testing.T, engine *DuckDBEngine, queryStr string, filter MessageFilter) []MessageSummary {
+	t.Helper()
+	q := search.Parse(queryStr)
+	results, err := engine.SearchFast(context.Background(), q, filter, 100, 0)
+	if err != nil {
+		t.Fatalf("SearchFast(%q): %v", queryStr, err)
+	}
+	return results
+}
+
+// requireAggregateRow finds an AggregateRow by key or fails the test.
+func requireAggregateRow(t *testing.T, rows []AggregateRow, key string) AggregateRow {
+	t.Helper()
+	for _, r := range rows {
+		if r.Key == key {
+			return r
+		}
+	}
+	t.Fatalf("aggregate row %q not found in %d rows", key, len(rows))
+	return AggregateRow{}
+}
+
+// assertMessageIDs checks that the returned messages have exactly the expected IDs (order-independent).
+func assertMessageIDs(t *testing.T, messages []MessageSummary, wantIDs []int64) {
+	t.Helper()
+	got := make(map[int64]bool)
+	for _, msg := range messages {
+		if got[msg.ID] {
+			t.Errorf("duplicate message ID %d", msg.ID)
+		}
+		got[msg.ID] = true
+	}
+	want := make(map[int64]bool)
+	for _, id := range wantIDs {
+		want[id] = true
+	}
+	for id := range want {
+		if !got[id] {
+			t.Errorf("missing expected message ID %d", id)
+		}
+	}
+	for id := range got {
+		if !want[id] {
+			t.Errorf("unexpected message ID %d", id)
+		}
+	}
+}
+
+// assertStringIDs checks that the returned string IDs match expected (order-independent).
+func assertStringIDs(t *testing.T, got []string, want []string) {
+	t.Helper()
+	gotSet := make(map[string]bool)
+	for _, id := range got {
+		if gotSet[id] {
+			t.Errorf("duplicate ID %s", id)
+		}
+		gotSet[id] = true
+	}
+	wantSet := make(map[string]bool)
+	for _, id := range want {
+		wantSet[id] = true
+	}
+	for id := range wantSet {
+		if !gotSet[id] {
+			t.Errorf("missing expected ID %s", id)
+		}
+	}
+	for id := range gotSet {
+		if !wantSet[id] {
+			t.Errorf("unexpected ID %s", id)
+		}
+	}
+}
+
+// assertSubjects checks that the returned messages have exactly the expected subjects (order-independent).
+func assertSubjects(t *testing.T, messages []MessageSummary, want ...string) {
+	t.Helper()
+	got := make(map[string]bool)
+	for _, msg := range messages {
+		got[msg.Subject] = true
+	}
+	for _, s := range want {
+		if !got[s] {
+			t.Errorf("expected subject %q not found in results", s)
+		}
+	}
+	if len(messages) != len(want) {
+		t.Errorf("expected %d messages, got %d", len(want), len(messages))
+	}
+}
+
 // setupTestParquet creates a temp directory with normalized Parquet test data.
 // Returns the analytics directory path and a cleanup function.
 // Creates separate Parquet files for: messages, sources, participants,
@@ -170,15 +303,7 @@ func TestDuckDBEngine_SQLiteEngineReuse(t *testing.T) {
 // TestDuckDBEngine_SearchFromAddrs verifies address-based search filtering
 // through the shared sqliteEngine path.
 func TestDuckDBEngine_SearchFromAddrs(t *testing.T) {
-	sqliteDB := setupTestDB(t)
-	defer sqliteDB.Close()
-
-	engine, err := NewDuckDBEngine("", "", sqliteDB)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newSQLiteEngine(t)
 	ctx := context.Background()
 
 	// Search by sender address
@@ -327,15 +452,7 @@ func TestDuckDBEngine_NoSQLiteDB(t *testing.T) {
 // TestDuckDBEngine_GetMessageWithAttachments verifies attachment retrieval
 // through the shared sqliteEngine path.
 func TestDuckDBEngine_GetMessageWithAttachments(t *testing.T) {
-	sqliteDB := setupTestDB(t)
-	defer sqliteDB.Close()
-
-	engine, err := NewDuckDBEngine("", "", sqliteDB)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newSQLiteEngine(t)
 	ctx := context.Background()
 
 	// Message 2 has 2 attachments
@@ -367,7 +484,7 @@ func TestDuckDBEngine_GetMessageWithAttachments(t *testing.T) {
 // are excluded when using the sqliteEngine path.
 func TestDuckDBEngine_DeletedMessagesIncluded(t *testing.T) {
 	sqliteDB := setupTestDB(t)
-	defer sqliteDB.Close()
+	t.Cleanup(func() { sqliteDB.Close() })
 
 	// Mark message 1 as deleted
 	_, err := sqliteDB.Exec("UPDATE messages SET deleted_from_source_at = datetime('now') WHERE id = 1")
@@ -379,7 +496,7 @@ func TestDuckDBEngine_DeletedMessagesIncluded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDuckDBEngine: %v", err)
 	}
-	defer engine.Close()
+	t.Cleanup(func() { engine.Close() })
 
 	ctx := context.Background()
 
@@ -405,15 +522,7 @@ func TestDuckDBEngine_DeletedMessagesIncluded(t *testing.T) {
 // TestDuckDBEngine_AggregateByRecipient verifies that recipient aggregation
 // includes both to and cc recipients using list_concat.
 func TestDuckDBEngine_AggregateByRecipient(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 	results, err := engine.AggregateByRecipient(ctx, DefaultAggregateOptions())
 	if err != nil {
@@ -442,32 +551,15 @@ func TestDuckDBEngine_AggregateByRecipient(t *testing.T) {
 	}
 
 	// Verify dan@other.net is included (cc recipient)
-	foundDan := false
-	for _, r := range results {
-		if r.Key == "dan@other.net" {
-			foundDan = true
-			if r.Count != 1 {
-				t.Errorf("expected dan@other.net count 1, got %d", r.Count)
-			}
-			break
-		}
-	}
-	if !foundDan {
-		t.Error("expected dan@other.net (cc recipient) to be included in results")
+	dan := requireAggregateRow(t, results, "dan@other.net")
+	if dan.Count != 1 {
+		t.Errorf("expected dan@other.net count 1, got %d", dan.Count)
 	}
 }
 
 // TestDuckDBEngine_AggregateBySender verifies sender aggregation from Parquet.
 func TestDuckDBEngine_AggregateBySender(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 	results, err := engine.AggregateBySender(ctx, DefaultAggregateOptions())
 	if err != nil {
@@ -490,15 +582,7 @@ func TestDuckDBEngine_AggregateBySender(t *testing.T) {
 // TestDuckDBEngine_AggregateAttachmentFields verifies attachment_count and attachment_size
 // are correctly scanned from aggregate queries (attachment_size is DOUBLE, attachment_count is INT).
 func TestDuckDBEngine_AggregateAttachmentFields(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 	results, err := engine.AggregateBySender(ctx, DefaultAggregateOptions())
 	if err != nil {
@@ -513,23 +597,8 @@ func TestDuckDBEngine_AggregateAttachmentFields(t *testing.T) {
 		t.Fatalf("expected at least 2 results, got %d", len(results))
 	}
 
-	// Find alice and bob in results (may be in any order depending on sort)
-	var alice, bob *AggregateRow
-	for i := range results {
-		switch results[i].Key {
-		case "alice@example.com":
-			alice = &results[i]
-		case "bob@company.org":
-			bob = &results[i]
-		}
-	}
-
-	if alice == nil {
-		t.Fatal("alice@example.com not found in results")
-	}
-	if bob == nil {
-		t.Fatal("bob@company.org not found in results")
-	}
+	alice := requireAggregateRow(t, results, "alice@example.com")
+	bob := requireAggregateRow(t, results, "bob@company.org")
 
 	// Verify alice's attachment fields
 	if alice.AttachmentCount != 2 {
@@ -550,15 +619,7 @@ func TestDuckDBEngine_AggregateAttachmentFields(t *testing.T) {
 
 // TestDuckDBEngine_AggregateByLabel verifies label aggregation from Parquet.
 func TestDuckDBEngine_AggregateByLabel(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 	results, err := engine.AggregateByLabel(ctx, DefaultAggregateOptions())
 	if err != nil {
@@ -581,15 +642,7 @@ func TestDuckDBEngine_AggregateByLabel(t *testing.T) {
 
 // TestDuckDBEngine_SubAggregateByRecipient verifies sub-aggregation includes cc.
 func TestDuckDBEngine_SubAggregateByRecipient(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 
 	// Filter by sender alice@example.com (msgs 1,2,3) and sub-aggregate by recipients
@@ -615,31 +668,15 @@ func TestDuckDBEngine_SubAggregateByRecipient(t *testing.T) {
 	}
 
 	// Verify dan@other.net (cc) is included
-	foundDan := false
-	for _, r := range results {
-		if r.Key == "dan@other.net" {
-			foundDan = true
-			if r.Count != 1 {
-				t.Errorf("expected dan@other.net count 1, got %d", r.Count)
-			}
-		}
-	}
-	if !foundDan {
-		t.Error("expected dan@other.net (cc recipient) in sub-aggregate results")
+	dan := requireAggregateRow(t, results, "dan@other.net")
+	if dan.Count != 1 {
+		t.Errorf("expected dan@other.net count 1, got %d", dan.Count)
 	}
 }
 
 // TestDuckDBEngine_AggregateByTime verifies time-based aggregation from Parquet.
 func TestDuckDBEngine_AggregateByTime(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 
 	opts := DefaultAggregateOptions()
@@ -688,61 +725,15 @@ func TestDuckDBEngine_AggregateByTime(t *testing.T) {
 
 // TestDuckDBEngine_SearchFast_Subject verifies searching by subject in Parquet.
 func TestDuckDBEngine_SearchFast_Subject(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
-
-	// Search for "Hello" in subject
-	q := search.Parse("Hello")
-	results, err := engine.SearchFast(ctx, q, MessageFilter{}, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
-
-	// Expected: "Hello World" and "Re: Hello" (2 messages)
-	if len(results) != 2 {
-		t.Errorf("expected 2 results for 'Hello', got %d", len(results))
-	}
-
-	// Verify subjects match
-	subjects := make(map[string]bool)
-	for _, r := range results {
-		subjects[r.Subject] = true
-	}
-	if !subjects["Hello World"] {
-		t.Error("expected 'Hello World' in results")
-	}
-	if !subjects["Re: Hello"] {
-		t.Error("expected 'Re: Hello' in results")
-	}
+	engine := newParquetEngine(t)
+	results := searchFast(t, engine, "Hello", MessageFilter{})
+	assertSubjects(t, results, "Hello World", "Re: Hello")
 }
 
 // TestDuckDBEngine_SearchFast_Sender verifies searching by sender in Parquet.
 func TestDuckDBEngine_SearchFast_Sender(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
-
-	// Search for "bob" (should match bob@company.org as sender)
-	q := search.Parse("bob")
-	results, err := engine.SearchFast(ctx, q, MessageFilter{}, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
+	engine := newParquetEngine(t)
+	results := searchFast(t, engine, "bob", MessageFilter{})
 
 	// Bob sent 2 messages (msg4, msg5) and received others
 	// Text search matches sender OR recipients, so all with bob in to_emails also match
@@ -765,30 +756,14 @@ func TestDuckDBEngine_SearchFast_Sender(t *testing.T) {
 
 // TestDuckDBEngine_SearchFast_FromFilter verifies from: filter in Parquet.
 func TestDuckDBEngine_SearchFast_FromFilter(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
-
-	// Search with from: filter
-	q := search.Parse("from:bob")
-	results, err := engine.SearchFast(ctx, q, MessageFilter{}, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
+	engine := newParquetEngine(t)
+	results := searchFast(t, engine, "from:bob", MessageFilter{})
 
 	// Bob sent exactly 2 messages (msg4, msg5)
 	if len(results) != 2 {
 		t.Errorf("expected 2 results for 'from:bob', got %d", len(results))
 	}
 
-	// All results should be from bob
 	for _, r := range results {
 		if r.FromEmail != "bob@company.org" {
 			t.Errorf("expected from bob@company.org, got %s", r.FromEmail)
@@ -798,24 +773,8 @@ func TestDuckDBEngine_SearchFast_FromFilter(t *testing.T) {
 
 // TestDuckDBEngine_SearchFast_LabelFilter verifies label: filter in Parquet.
 func TestDuckDBEngine_SearchFast_LabelFilter(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
-
-	// Search for messages with "Work" label
-	q := search.Parse("label:Work")
-	results, err := engine.SearchFast(ctx, q, MessageFilter{}, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
-
+	engine := newParquetEngine(t)
+	results := searchFast(t, engine, "label:Work", MessageFilter{})
 	// 2 messages have "Work" label (msg1, msg4)
 	if len(results) != 2 {
 		t.Errorf("expected 2 results for 'label:Work', got %d", len(results))
@@ -824,23 +783,8 @@ func TestDuckDBEngine_SearchFast_LabelFilter(t *testing.T) {
 
 // TestDuckDBEngine_SearchFast_HasAttachment verifies has:attachment filter in Parquet.
 func TestDuckDBEngine_SearchFast_HasAttachment(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
-
-	// Search for messages with attachments
-	q := search.Parse("has:attachment")
-	results, err := engine.SearchFast(ctx, q, MessageFilter{}, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
+	engine := newParquetEngine(t)
+	results := searchFast(t, engine, "has:attachment", MessageFilter{})
 
 	// 2 messages have attachments (msg2, msg4)
 	if len(results) != 2 {
@@ -856,31 +800,14 @@ func TestDuckDBEngine_SearchFast_HasAttachment(t *testing.T) {
 
 // TestDuckDBEngine_SearchFast_ContextFilter verifies search with context filter.
 func TestDuckDBEngine_SearchFast_ContextFilter(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
-
-	// Search for "Hello" but only within alice@example.com's messages
-	q := search.Parse("Hello")
-	filter := MessageFilter{Sender: "alice@example.com"}
-	results, err := engine.SearchFast(ctx, q, filter, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
+	engine := newParquetEngine(t)
+	results := searchFast(t, engine, "Hello", MessageFilter{Sender: "alice@example.com"})
 
 	// Alice sent 3 messages total, 2 of which have "Hello" in subject
 	if len(results) != 2 {
 		t.Errorf("expected 2 results for 'Hello' from alice, got %d", len(results))
 	}
 
-	// All results should be from alice
 	for _, r := range results {
 		if r.FromEmail != "alice@example.com" {
 			t.Errorf("expected from alice@example.com, got %s", r.FromEmail)
@@ -891,178 +818,60 @@ func TestDuckDBEngine_SearchFast_ContextFilter(t *testing.T) {
 // TestDuckDBEngine_SearchFast_RecipientContextFilter verifies search within messages
 // to a specific recipient.
 func TestDuckDBEngine_SearchFast_RecipientContextFilter(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
+	engine := newParquetEngine(t)
 
 	// Test data: bob is recipient in msgs 1,2,3 (to: bob+carol, to: bob, to: bob)
 	// msg1 = "Hello World", msg2 = "Re: Hello", msg3 = "Follow up"
 	// Search for "Hello" within messages to bob should find msg1 and msg2
-	q := search.Parse("Hello")
-	filter := MessageFilter{Recipient: "bob@company.org"}
-	results, err := engine.SearchFast(ctx, q, filter, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
-
-	if len(results) != 2 {
-		t.Errorf("expected 2 results for 'Hello' to bob, got %d", len(results))
-		for _, r := range results {
-			t.Logf("  got: %s", r.Subject)
-		}
-	}
-
-	// Verify expected subjects
-	subjects := make(map[string]bool)
-	for _, r := range results {
-		subjects[r.Subject] = true
-	}
-	if !subjects["Hello World"] {
-		t.Error("expected 'Hello World' in results")
-	}
-	if !subjects["Re: Hello"] {
-		t.Error("expected 'Re: Hello' in results")
-	}
+	results := searchFast(t, engine, "Hello", MessageFilter{Recipient: "bob@company.org"})
+	assertSubjects(t, results, "Hello World", "Re: Hello")
 }
 
 // TestDuckDBEngine_SearchFast_LabelContextFilter verifies search within messages
 // with a specific label.
 func TestDuckDBEngine_SearchFast_LabelContextFilter(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
+	engine := newParquetEngine(t)
 
 	// Test data: Work label is on msgs 1,4 ("Hello World", "Question")
 	// Search for "Hello" within Work label should find only msg1
-	q := search.Parse("Hello")
-	filter := MessageFilter{Label: "Work"}
-	results, err := engine.SearchFast(ctx, q, filter, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
-
-	if len(results) != 1 {
-		t.Errorf("expected 1 result for 'Hello' in Work label, got %d", len(results))
-		for _, r := range results {
-			t.Logf("  got: %s", r.Subject)
-		}
-	}
-
-	if len(results) > 0 && results[0].Subject != "Hello World" {
-		t.Errorf("expected 'Hello World', got %q", results[0].Subject)
-	}
+	results := searchFast(t, engine, "Hello", MessageFilter{Label: "Work"})
+	assertSubjects(t, results, "Hello World")
 }
 
 // TestDuckDBEngine_SearchFast_DomainContextFilter verifies search within messages
 // from a specific domain using case-insensitive ILIKE.
 func TestDuckDBEngine_SearchFast_DomainContextFilter(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
+	engine := newParquetEngine(t)
 
 	// Test data: example.com domain has alice (msgs 1,2,3)
 	// company.org domain has bob (msgs 4,5)
 	// Search for "Question" within company.org should find msg4
-	q := search.Parse("Question")
-	filter := MessageFilter{Domain: "company.org"}
-	results, err := engine.SearchFast(ctx, q, filter, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
-
-	if len(results) != 1 {
-		t.Errorf("expected 1 result for 'Question' from company.org, got %d", len(results))
-	}
-
-	if len(results) > 0 && results[0].Subject != "Question" {
-		t.Errorf("expected 'Question', got %q", results[0].Subject)
-	}
+	results := searchFast(t, engine, "Question", MessageFilter{Domain: "company.org"})
+	assertSubjects(t, results, "Question")
 
 	// Test case-insensitivity of domain filter (ILIKE)
-	q2 := search.Parse("Hello")
-	filter2 := MessageFilter{Domain: "EXAMPLE.COM"} // uppercase domain
-	results2, err := engine.SearchFast(ctx, q2, filter2, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast with uppercase domain: %v", err)
-	}
-
-	// Should find msgs 1,2 (alice@example.com sent "Hello World" and "Re: Hello")
-	if len(results2) != 2 {
-		t.Errorf("expected 2 results for 'Hello' from EXAMPLE.COM (case-insensitive), got %d", len(results2))
-	}
+	results2 := searchFast(t, engine, "Hello", MessageFilter{Domain: "EXAMPLE.COM"})
+	assertSubjects(t, results2, "Hello World", "Re: Hello")
 }
 
 // TestDuckDBEngine_SearchFast_ToFilter verifies searching by recipient in Parquet.
 func TestDuckDBEngine_SearchFast_ToFilter(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
+	engine := newParquetEngine(t)
 
 	// Search with to: filter - bob is in to_emails for msgs 1,2,3
-	q := search.Parse("to:bob")
-	results, err := engine.SearchFast(ctx, q, MessageFilter{}, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
-
+	results := searchFast(t, engine, "to:bob", MessageFilter{})
 	if len(results) != 3 {
 		t.Errorf("expected 3 results for 'to:bob', got %d", len(results))
 	}
 
 	// carol is in position 2 of to_emails for msg1 - should still be found
-	q2 := search.Parse("to:carol")
-	results2, err := engine.SearchFast(ctx, q2, MessageFilter{}, 100, 0)
-	if err != nil {
-		t.Fatalf("SearchFast: %v", err)
-	}
-	if len(results2) != 1 {
-		t.Errorf("expected 1 result for 'to:carol', got %d", len(results2))
-	}
-	if len(results2) > 0 && results2[0].Subject != "Hello World" {
-		t.Errorf("expected 'Hello World', got %s", results2[0].Subject)
-	}
+	results2 := searchFast(t, engine, "to:carol", MessageFilter{})
+	assertSubjects(t, results2, "Hello World")
 }
 
 // TestDuckDBEngine_SearchFast_CaseInsensitive verifies case-insensitive search.
 func TestDuckDBEngine_SearchFast_CaseInsensitive(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
-	ctx := context.Background()
+	engine := newParquetEngine(t)
 
 	// Search with different case
 	tests := []struct {
@@ -1077,11 +886,7 @@ func TestDuckDBEngine_SearchFast_CaseInsensitive(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		q := search.Parse(tc.query)
-		results, err := engine.SearchFast(ctx, q, MessageFilter{}, 100, 0)
-		if err != nil {
-			t.Fatalf("SearchFast(%q): %v", tc.query, err)
-		}
+		results := searchFast(t, engine, tc.query, MessageFilter{})
 		if len(results) != tc.expected {
 			t.Errorf("SearchFast(%q): expected %d results, got %d", tc.query, tc.expected, len(results))
 		}
@@ -1123,15 +928,7 @@ func TestDuckDBEngine_ThreadCount(t *testing.T) {
 }
 
 func TestDuckDBEngine_ListMessages_ConversationIDFilter(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 
 	// Test data has conversations:
@@ -1218,15 +1015,7 @@ func TestDuckDBEngine_ListMessages_ConversationIDFilter(t *testing.T) {
 //
 //	Participants: alice@example.com, bob@company.org, carol@example.com, dan@other.net
 func TestDuckDBEngine_ListMessages_Filters(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1273,46 +1062,13 @@ func TestDuckDBEngine_ListMessages_Filters(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ListMessages: %v", err)
 			}
-
-			// Collect returned IDs
-			gotIDs := make(map[int64]bool)
-			for _, msg := range messages {
-				if gotIDs[msg.ID] {
-					t.Errorf("duplicate message ID %d", msg.ID)
-				}
-				gotIDs[msg.ID] = true
-			}
-
-			// Verify expected IDs
-			wantIDs := make(map[int64]bool)
-			for _, id := range tt.wantIDs {
-				wantIDs[id] = true
-			}
-
-			for id := range wantIDs {
-				if !gotIDs[id] {
-					t.Errorf("missing expected message ID %d", id)
-				}
-			}
-			for id := range gotIDs {
-				if !wantIDs[id] {
-					t.Errorf("unexpected message ID %d", id)
-				}
-			}
+			assertMessageIDs(t, messages, tt.wantIDs)
 		})
 	}
 }
 
 func TestDuckDBEngine_GetGmailIDsByFilter(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1383,31 +1139,7 @@ func TestDuckDBEngine_GetGmailIDsByFilter(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetGmailIDsByFilter: %v", err)
 			}
-
-			// Convert to set for comparison
-			gotIDs := make(map[string]bool)
-			for _, id := range ids {
-				if gotIDs[id] {
-					t.Errorf("duplicate gmail ID %s", id)
-				}
-				gotIDs[id] = true
-			}
-
-			wantSet := make(map[string]bool)
-			for _, id := range tt.wantIDs {
-				wantSet[id] = true
-			}
-
-			for id := range wantSet {
-				if !gotIDs[id] {
-					t.Errorf("missing expected gmail ID %s", id)
-				}
-			}
-			for id := range gotIDs {
-				if !wantSet[id] {
-					t.Errorf("unexpected gmail ID %s", id)
-				}
-			}
+			assertStringIDs(t, ids, tt.wantIDs)
 		})
 	}
 }
@@ -1473,15 +1205,7 @@ func setupTestParquetWithEmptyBuckets(t *testing.T) (string, func()) {
 // TestDuckDBEngine_ListMessages_MatchEmptySender verifies that MatchEmptySender
 // finds messages with no 'from' entry in message_recipients.
 func TestDuckDBEngine_ListMessages_MatchEmptySender(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquetWithEmptyBuckets(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newEmptyBucketsEngine(t)
 	ctx := context.Background()
 
 	filter := MessageFilter{
@@ -1509,15 +1233,7 @@ func TestDuckDBEngine_ListMessages_MatchEmptySender(t *testing.T) {
 // TestDuckDBEngine_ListMessages_MatchEmptyRecipient verifies that MatchEmptyRecipient
 // finds messages with no 'to' or 'cc' entries in message_recipients.
 func TestDuckDBEngine_ListMessages_MatchEmptyRecipient(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquetWithEmptyBuckets(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newEmptyBucketsEngine(t)
 	ctx := context.Background()
 
 	filter := MessageFilter{
@@ -1545,15 +1261,7 @@ func TestDuckDBEngine_ListMessages_MatchEmptyRecipient(t *testing.T) {
 // TestDuckDBEngine_ListMessages_MatchEmptyDomain verifies that MatchEmptyDomain
 // finds messages where the sender has no domain.
 func TestDuckDBEngine_ListMessages_MatchEmptyDomain(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquetWithEmptyBuckets(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newEmptyBucketsEngine(t)
 	ctx := context.Background()
 
 	filter := MessageFilter{
@@ -1588,15 +1296,7 @@ func TestDuckDBEngine_ListMessages_MatchEmptyDomain(t *testing.T) {
 // TestDuckDBEngine_ListMessages_MatchEmptyLabel verifies that MatchEmptyLabel
 // finds messages with no labels.
 func TestDuckDBEngine_ListMessages_MatchEmptyLabel(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquetWithEmptyBuckets(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newEmptyBucketsEngine(t)
 	ctx := context.Background()
 
 	filter := MessageFilter{
@@ -1624,15 +1324,7 @@ func TestDuckDBEngine_ListMessages_MatchEmptyLabel(t *testing.T) {
 // TestDuckDBEngine_ListMessages_MatchEmptyCombined verifies that multiple
 // MatchEmpty* flags create restrictive AND conditions.
 func TestDuckDBEngine_ListMessages_MatchEmptyCombined(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquetWithEmptyBuckets(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newEmptyBucketsEngine(t)
 	ctx := context.Background()
 
 	// Test: MatchEmptyLabel AND specific sender
@@ -1677,15 +1369,7 @@ func TestDuckDBEngine_GetGmailIDsByFilter_NoParquet(t *testing.T) {
 
 // TestDuckDBEngine_GetGmailIDsByFilter_NonExistent verifies empty results for non-existent values.
 func TestDuckDBEngine_GetGmailIDsByFilter_NonExistent(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1713,15 +1397,7 @@ func TestDuckDBEngine_GetGmailIDsByFilter_NonExistent(t *testing.T) {
 
 // TestDuckDBEngine_GetGmailIDsByFilter_EmptyFilter verifies that empty filter returns all messages.
 func TestDuckDBEngine_GetGmailIDsByFilter_EmptyFilter(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 
 	// Empty filter - should return all 5 messages
@@ -1730,35 +1406,13 @@ func TestDuckDBEngine_GetGmailIDsByFilter_EmptyFilter(t *testing.T) {
 		t.Fatalf("GetGmailIDsByFilter with empty filter: %v", err)
 	}
 
-	if len(ids) != 5 {
-		t.Errorf("expected 5 gmail IDs with empty filter, got %d", len(ids))
-	}
-
-	// Verify all test message IDs are present
-	idSet := make(map[string]bool)
-	for _, id := range ids {
-		idSet[id] = true
-	}
-	expectedIDs := []string{"msg1", "msg2", "msg3", "msg4", "msg5"}
-	for _, expected := range expectedIDs {
-		if !idSet[expected] {
-			t.Errorf("missing expected gmail ID %s", expected)
-		}
-	}
+	assertStringIDs(t, ids, []string{"msg1", "msg2", "msg3", "msg4", "msg5"})
 }
 
 // TestDuckDBEngine_GetGmailIDsByFilter_CombinedNoMatch verifies empty results for
 // combined filters that match nothing.
 func TestDuckDBEngine_GetGmailIDsByFilter_CombinedNoMatch(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 
 	// Alice sent messages but none have IMPORTANT label in test data
@@ -1898,15 +1552,7 @@ func TestBuildWhereClause_EscapedArgs(t *testing.T) {
 // TestAggregateBySender_WithSearchQuery verifies that aggregate queries respect
 // search query filters.
 func TestAggregateBySender_WithSearchQuery(t *testing.T) {
-	analyticsDir, cleanup := setupTestParquet(t)
-	defer cleanup()
-
-	engine, err := NewDuckDBEngine(analyticsDir, "", nil)
-	if err != nil {
-		t.Fatalf("NewDuckDBEngine: %v", err)
-	}
-	defer engine.Close()
-
+	engine := newParquetEngine(t)
 	ctx := context.Background()
 
 	// Test data has:
