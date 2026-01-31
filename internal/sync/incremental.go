@@ -134,13 +134,13 @@ func (s *Syncer) Incremental(ctx context.Context, email string) (*gmail.SyncSumm
 			// Handle label changes
 			for _, labelAdded := range record.LabelsAdded {
 				if err := s.handleLabelChange(ctx, source.ID, labelAdded.Message.ID, labelAdded.Message.ThreadID, labelAdded.LabelIDs, labelMap, true); err != nil {
-					s.logger.Warn("failed to handle label add", "id", labelAdded.Message.ID, "error", err)
+					logLabelChangeError(s, "add", labelAdded.Message.ID, err)
 				}
 			}
 
 			for _, labelRemoved := range record.LabelsRemoved {
 				if err := s.handleLabelChange(ctx, source.ID, labelRemoved.Message.ID, labelRemoved.Message.ThreadID, labelRemoved.LabelIDs, labelMap, false); err != nil {
-					s.logger.Warn("failed to handle label remove", "id", labelRemoved.Message.ID, "error", err)
+					logLabelChangeError(s, "remove", labelRemoved.Message.ID, err)
 				}
 			}
 
@@ -228,4 +228,16 @@ func (s *Syncer) handleLabelChange(ctx context.Context, sourceID int64, messageI
 	}
 
 	return s.store.ReplaceMessageLabels(internalID, labelIDs)
+}
+
+// logLabelChangeError logs label change errors, downgrading "not found"
+// to a debug-level message since deleted messages are expected during
+// incremental sync (e.g., spam auto-deleted between sync runs).
+func logLabelChangeError(s *Syncer, action, messageID string, err error) {
+	var notFound *gmail.NotFoundError
+	if errors.As(err, &notFound) {
+		s.logger.Debug("skipping label "+action+": message deleted from Gmail", "id", messageID)
+	} else {
+		s.logger.Warn("failed to handle label "+action, "id", messageID, "error", err)
+	}
 }
