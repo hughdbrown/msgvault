@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/wesm/msgvault/internal/query"
 	"github.com/wesm/msgvault/internal/search"
 )
+
+const maxLimit = 1000
 
 type handlers struct {
 	engine query.Engine
@@ -48,12 +51,15 @@ func (h *handlers) searchMessages(ctx context.Context, req mcp.CallToolRequest) 
 func (h *handlers) getMessage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 
-	id, ok := args["id"].(float64)
+	idFloat, ok := args["id"].(float64)
 	if !ok {
 		return mcp.NewToolResultError("id parameter is required"), nil
 	}
+	if idFloat != math.Trunc(idFloat) || idFloat < 1 {
+		return mcp.NewToolResultError("id must be a positive integer"), nil
+	}
 
-	msg, err := h.engine.GetMessage(ctx, int64(id))
+	msg, err := h.engine.GetMessage(ctx, int64(idFloat))
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("message not found: %v", err)), nil
 	}
@@ -82,14 +88,18 @@ func (h *handlers) listMessages(ctx context.Context, req mcp.CallToolRequest) (*
 		filter.WithAttachmentsOnly = true
 	}
 	if v, ok := args["after"].(string); ok && v != "" {
-		if t, err := time.Parse("2006-01-02", v); err == nil {
-			filter.After = &t
+		t, err := time.Parse("2006-01-02", v)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid after date %q: expected YYYY-MM-DD", v)), nil
 		}
+		filter.After = &t
 	}
 	if v, ok := args["before"].(string); ok && v != "" {
-		if t, err := time.Parse("2006-01-02", v); err == nil {
-			filter.Before = &t
+		t, err := time.Parse("2006-01-02", v)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid before date %q: expected YYYY-MM-DD", v)), nil
 		}
+		filter.Before = &t
 	}
 
 	results, err := h.engine.ListMessages(ctx, filter)
@@ -135,14 +145,18 @@ func (h *handlers) aggregate(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 
 	if v, ok := args["after"].(string); ok && v != "" {
-		if t, err := time.Parse("2006-01-02", v); err == nil {
-			opts.After = &t
+		t, err := time.Parse("2006-01-02", v)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid after date %q: expected YYYY-MM-DD", v)), nil
 		}
+		opts.After = &t
 	}
 	if v, ok := args["before"].(string); ok && v != "" {
-		if t, err := time.Parse("2006-01-02", v); err == nil {
-			opts.Before = &t
+		t, err := time.Parse("2006-01-02", v)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid before date %q: expected YYYY-MM-DD", v)), nil
 		}
+		opts.Before = &t
 	}
 
 	var (
@@ -172,11 +186,19 @@ func (h *handlers) aggregate(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	return jsonResult(rows)
 }
 
-// intArg extracts an integer from a map, with a default value.
-// JSON numbers arrive as float64.
+// intArg extracts a non-negative integer from a map, with a default value.
+// JSON numbers arrive as float64. Negative values are clamped to 0,
+// and values above maxLimit are clamped to maxLimit.
 func intArg(args map[string]any, key string, def int) int {
 	if v, ok := args[key].(float64); ok {
-		return int(v)
+		n := int(v)
+		if n < 0 {
+			return 0
+		}
+		if n > maxLimit {
+			return maxLimit
+		}
+		return n
 	}
 	return def
 }

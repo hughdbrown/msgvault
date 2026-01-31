@@ -94,6 +94,11 @@ Requires Ollama running with a model available.`,
 		fmt.Println("Type your question, or 'quit' to exit. Ctrl+C cancels current request.")
 		fmt.Println()
 
+		// Ignore SIGINT while waiting for input so Ctrl+C at the prompt
+		// doesn't kill the process. We swap in a per-request handler during Ask().
+		idleSig := make(chan os.Signal, 1)
+		signal.Notify(idleSig, os.Interrupt)
+
 		scanner := bufio.NewScanner(os.Stdin)
 		for {
 			fmt.Print("> ")
@@ -108,6 +113,9 @@ Requires Ollama running with a model available.`,
 				break
 			}
 
+			// Stop the idle handler so the per-request handler can take over.
+			signal.Stop(idleSig)
+
 			// Fresh signal context per request — stop() deregisters the
 			// signal handler so no stale signal leaks into the next iteration.
 			reqCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -120,8 +128,13 @@ Requires Ollama running with a model available.`,
 				}
 			}
 			stop()
+
+			// Re-install the idle handler to absorb SIGINT at the prompt.
+			signal.Notify(idleSig, os.Interrupt)
 			fmt.Println()
 		}
+
+		signal.Stop(idleSig)
 
 		if err := scanner.Err(); err != nil {
 			return fmt.Errorf("read input: %w", err)

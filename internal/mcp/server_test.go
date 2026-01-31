@@ -201,6 +201,20 @@ func TestGetMessage(t *testing.T) {
 			t.Fatal("expected error for missing id")
 		}
 	})
+
+	t.Run("non-integer id", func(t *testing.T) {
+		r := callTool(t, h, "get_message", map[string]any{"id": float64(1.9)})
+		if !r.IsError {
+			t.Fatal("expected error for non-integer id")
+		}
+	})
+
+	t.Run("negative id", func(t *testing.T) {
+		r := callTool(t, h, "get_message", map[string]any{"id": float64(-1)})
+		if !r.IsError {
+			t.Fatal("expected error for negative id")
+		}
+	})
 }
 
 func TestGetStats(t *testing.T) {
@@ -286,19 +300,75 @@ func TestListMessages(t *testing.T) {
 	}
 	h := &handlers{engine: eng}
 
-	r := callTool(t, h, "list_messages", map[string]any{
-		"from":  "alice@example.com",
-		"after": "2024-01-01",
-		"limit": float64(10),
+	t.Run("valid filters", func(t *testing.T) {
+		r := callTool(t, h, "list_messages", map[string]any{
+			"from":  "alice@example.com",
+			"after": "2024-01-01",
+			"limit": float64(10),
+		})
+		if r.IsError {
+			t.Fatalf("unexpected error: %s", resultText(t, r))
+		}
+		var msgs []query.MessageSummary
+		if err := json.Unmarshal([]byte(resultText(t, r)), &msgs); err != nil {
+			t.Fatal(err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("expected 1 message, got %d", len(msgs))
+		}
 	})
-	if r.IsError {
-		t.Fatalf("unexpected error: %s", resultText(t, r))
+
+	t.Run("invalid after date", func(t *testing.T) {
+		r := callTool(t, h, "list_messages", map[string]any{"after": "not-a-date"})
+		if !r.IsError {
+			t.Fatal("expected error for invalid after date")
+		}
+	})
+
+	t.Run("invalid before date", func(t *testing.T) {
+		r := callTool(t, h, "list_messages", map[string]any{"before": "2024/01/01"})
+		if !r.IsError {
+			t.Fatal("expected error for invalid before date")
+		}
+	})
+}
+
+func TestAggregateInvalidDates(t *testing.T) {
+	eng := &stubEngine{}
+	h := &handlers{engine: eng}
+
+	t.Run("invalid after", func(t *testing.T) {
+		r := callTool(t, h, "aggregate", map[string]any{"group_by": "sender", "after": "bad"})
+		if !r.IsError {
+			t.Fatal("expected error for invalid after date")
+		}
+	})
+
+	t.Run("invalid before", func(t *testing.T) {
+		r := callTool(t, h, "aggregate", map[string]any{"group_by": "sender", "before": "bad"})
+		if !r.IsError {
+			t.Fatal("expected error for invalid before date")
+		}
+	})
+}
+
+func TestIntArgClamping(t *testing.T) {
+	tests := []struct {
+		name string
+		val  float64
+		want int
+	}{
+		{"negative clamped to 0", -5, 0},
+		{"zero stays zero", 0, 0},
+		{"normal value", 50, 50},
+		{"above max clamped", 5000, maxLimit},
 	}
-	var msgs []query.MessageSummary
-	if err := json.Unmarshal([]byte(resultText(t, r)), &msgs); err != nil {
-		t.Fatal(err)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(msgs))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := intArg(map[string]any{"x": tt.val}, "x", 20)
+			if got != tt.want {
+				t.Fatalf("intArg(%v) = %d, want %d", tt.val, got, tt.want)
+			}
+		})
 	}
 }
