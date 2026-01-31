@@ -155,6 +155,7 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 	}
 
 	fmt.Println("Building cache...")
+	buildStart := time.Now()
 
 	// Build WHERE clause for incremental exports
 	idFilter := ""
@@ -162,12 +163,22 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 		idFilter = fmt.Sprintf(" AND m.id > %d", lastMessageID)
 	}
 
+	// runExport executes a COPY query and prints timing info.
+	runExport := func(label, query string) error {
+		start := time.Now()
+		fmt.Printf("  %-25s", label+"...")
+		if _, err := db.Exec(query); err != nil {
+			fmt.Println()
+			return err
+		}
+		fmt.Printf(" done (%s)\n", time.Since(start).Round(time.Millisecond))
+		return nil
+	}
+
 	// Export each table separately - this is MUCH faster than joining during export
 	// because DuckDB can use SQLite indexes efficiently for simple queries
 
 	// 1. Export messages (partitioned by year)
-	// For full rebuild: OVERWRITE_OR_IGNORE to replace partitions
-	// For incremental: APPEND to add new files (DuckDB reads all files in a partition)
 	messagesDir := filepath.Join(analyticsDir, "messages")
 	escapedMessagesDir := strings.ReplaceAll(messagesDir, "'", "''")
 
@@ -176,7 +187,7 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 		writeMode = "APPEND"
 	}
 
-	messagesSQL := fmt.Sprintf(`
+	if err := runExport("messages", fmt.Sprintf(`
 	COPY (
 		SELECT
 			m.id,
@@ -199,60 +210,18 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 		%s,
 		COMPRESSION 'zstd'
 	)
-	`, idFilter, escapedMessagesDir, writeMode)
-
-	if _, err := db.Exec(messagesSQL); err != nil {
+	`, idFilter, escapedMessagesDir, writeMode)); err != nil {
 		return nil, fmt.Errorf("export messages: %w", err)
 	}
 
-	// 2. Export sources (small table, always full export)
-	sourcesDir := filepath.Join(analyticsDir, "sources")
-	escapedSourcesDir := strings.ReplaceAll(sourcesDir, "'", "''")
-	sourcesSQL := fmt.Sprintf(`
-	COPY (
-		SELECT
-			id,
-			identifier as account_email
-		FROM sqlite_db.sources
-	) TO '%s/sources.parquet' (
-		FORMAT PARQUET,
-		COMPRESSION 'zstd'
-	)
-	`, escapedSourcesDir)
-
-	if _, err := db.Exec(sourcesSQL); err != nil {
-		return nil, fmt.Errorf("export sources: %w", err)
-	}
-
-	// 3. Export participants (small table relative to messages, always full export)
-	participantsDir := filepath.Join(analyticsDir, "participants")
-	escapedParticipantsDir := strings.ReplaceAll(participantsDir, "'", "''")
-	participantsSQL := fmt.Sprintf(`
-	COPY (
-		SELECT
-			id,
-			COALESCE(TRY_CAST(email_address AS VARCHAR), '') as email_address,
-			COALESCE(TRY_CAST(domain AS VARCHAR), '') as domain,
-			COALESCE(TRY_CAST(display_name AS VARCHAR), '') as display_name
-		FROM sqlite_db.participants
-	) TO '%s/participants.parquet' (
-		FORMAT PARQUET,
-		COMPRESSION 'zstd'
-	)
-	`, escapedParticipantsDir)
-
-	if _, err := db.Exec(participantsSQL); err != nil {
-		return nil, fmt.Errorf("export participants: %w", err)
-	}
-
-	// 4. Export message_recipients (filter by message_id for incremental)
+	// 2. Export message_recipients (large junction table)
 	recipientsDir := filepath.Join(analyticsDir, "message_recipients")
 	escapedRecipientsDir := strings.ReplaceAll(recipientsDir, "'", "''")
 	recipientsFilter := ""
 	if !fullRebuild && lastMessageID > 0 {
 		recipientsFilter = fmt.Sprintf(" WHERE message_id > %d", lastMessageID)
 	}
-	recipientsSQL := fmt.Sprintf(`
+	if err := runExport("message_recipients", fmt.Sprintf(`
 	COPY (
 		SELECT
 			message_id,
@@ -265,39 +234,18 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 		COMPRESSION 'zstd',
 		APPEND
 	)
-	`, recipientsFilter, escapedRecipientsDir)
-
-	if _, err := db.Exec(recipientsSQL); err != nil {
+	`, recipientsFilter, escapedRecipientsDir)); err != nil {
 		return nil, fmt.Errorf("export message_recipients: %w", err)
 	}
 
-	// 5. Export labels (small table, always full export)
-	labelsDir := filepath.Join(analyticsDir, "labels")
-	escapedLabelsDir := strings.ReplaceAll(labelsDir, "'", "''")
-	labelsSQL := fmt.Sprintf(`
-	COPY (
-		SELECT
-			id,
-			COALESCE(TRY_CAST(name AS VARCHAR), '') as name
-		FROM sqlite_db.labels
-	) TO '%s/labels.parquet' (
-		FORMAT PARQUET,
-		COMPRESSION 'zstd'
-	)
-	`, escapedLabelsDir)
-
-	if _, err := db.Exec(labelsSQL); err != nil {
-		return nil, fmt.Errorf("export labels: %w", err)
-	}
-
-	// 6. Export message_labels (filter by message_id for incremental)
+	// 3. Export message_labels (large junction table)
 	messageLabelsDir := filepath.Join(analyticsDir, "message_labels")
 	escapedMessageLabelsDir := strings.ReplaceAll(messageLabelsDir, "'", "''")
 	messageLabelsFilter := ""
 	if !fullRebuild && lastMessageID > 0 {
 		messageLabelsFilter = fmt.Sprintf(" WHERE message_id > %d", lastMessageID)
 	}
-	messageLabelsSQL := fmt.Sprintf(`
+	if err := runExport("message_labels", fmt.Sprintf(`
 	COPY (
 		SELECT
 			message_id,
@@ -308,20 +256,18 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 		COMPRESSION 'zstd',
 		APPEND
 	)
-	`, messageLabelsFilter, escapedMessageLabelsDir)
-
-	if _, err := db.Exec(messageLabelsSQL); err != nil {
+	`, messageLabelsFilter, escapedMessageLabelsDir)); err != nil {
 		return nil, fmt.Errorf("export message_labels: %w", err)
 	}
 
-	// 7. Export attachments (filter by message_id for incremental)
+	// 4. Export attachments
 	attachmentsDir := filepath.Join(analyticsDir, "attachments")
 	escapedAttachmentsDir := strings.ReplaceAll(attachmentsDir, "'", "''")
 	attachmentsFilter := ""
 	if !fullRebuild && lastMessageID > 0 {
 		attachmentsFilter = fmt.Sprintf(" WHERE message_id > %d", lastMessageID)
 	}
-	attachmentsSQL := fmt.Sprintf(`
+	if err := runExport("attachments", fmt.Sprintf(`
 	COPY (
 		SELECT
 			message_id,
@@ -333,17 +279,69 @@ func buildCache(dbPath, analyticsDir string, fullRebuild bool) (*buildResult, er
 		COMPRESSION 'zstd',
 		APPEND
 	)
-	`, attachmentsFilter, escapedAttachmentsDir)
-
-	if _, err := db.Exec(attachmentsSQL); err != nil {
+	`, attachmentsFilter, escapedAttachmentsDir)); err != nil {
 		return nil, fmt.Errorf("export attachments: %w", err)
 	}
+
+	// 5. Export participants
+	participantsDir := filepath.Join(analyticsDir, "participants")
+	escapedParticipantsDir := strings.ReplaceAll(participantsDir, "'", "''")
+	if err := runExport("participants", fmt.Sprintf(`
+	COPY (
+		SELECT
+			id,
+			COALESCE(TRY_CAST(email_address AS VARCHAR), '') as email_address,
+			COALESCE(TRY_CAST(domain AS VARCHAR), '') as domain,
+			COALESCE(TRY_CAST(display_name AS VARCHAR), '') as display_name
+		FROM sqlite_db.participants
+	) TO '%s/participants.parquet' (
+		FORMAT PARQUET,
+		COMPRESSION 'zstd'
+	)
+	`, escapedParticipantsDir)); err != nil {
+		return nil, fmt.Errorf("export participants: %w", err)
+	}
+
+	// 6. Export labels
+	labelsDir := filepath.Join(analyticsDir, "labels")
+	escapedLabelsDir := strings.ReplaceAll(labelsDir, "'", "''")
+	if err := runExport("labels", fmt.Sprintf(`
+	COPY (
+		SELECT
+			id,
+			COALESCE(TRY_CAST(name AS VARCHAR), '') as name
+		FROM sqlite_db.labels
+	) TO '%s/labels.parquet' (
+		FORMAT PARQUET,
+		COMPRESSION 'zstd'
+	)
+	`, escapedLabelsDir)); err != nil {
+		return nil, fmt.Errorf("export labels: %w", err)
+	}
+
+	// 7. Export sources
+	sourcesDir := filepath.Join(analyticsDir, "sources")
+	escapedSourcesDir := strings.ReplaceAll(sourcesDir, "'", "''")
+	if err := runExport("sources", fmt.Sprintf(`
+	COPY (
+		SELECT
+			id,
+			identifier as account_email
+		FROM sqlite_db.sources
+	) TO '%s/sources.parquet' (
+		FORMAT PARQUET,
+		COMPRESSION 'zstd'
+	)
+	`, escapedSourcesDir)); err != nil {
+		return nil, fmt.Errorf("export sources: %w", err)
+	}
+
+	fmt.Printf("  %-25s %s\n", "Total:", time.Since(buildStart).Round(time.Millisecond))
 
 	// Count exported messages
 	var exportedCount int64
 	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM read_parquet('%s/**/*.parquet', hive_partitioning=true)", escapedMessagesDir)
 	if err := db.QueryRow(countSQL).Scan(&exportedCount); err != nil {
-		// If no files exist yet, count is 0
 		exportedCount = 0
 	}
 
