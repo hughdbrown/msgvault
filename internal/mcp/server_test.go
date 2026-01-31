@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -215,6 +216,13 @@ func TestGetMessage(t *testing.T) {
 			t.Fatal("expected error for negative id")
 		}
 	})
+
+	t.Run("overflow id", func(t *testing.T) {
+		r := callTool(t, h, "get_message", map[string]any{"id": float64(1e19)})
+		if !r.IsError {
+			t.Fatal("expected error for overflow id")
+		}
+	})
 }
 
 func TestGetStats(t *testing.T) {
@@ -362,6 +370,10 @@ func TestIntArgClamping(t *testing.T) {
 		{"zero stays zero", 0, 0},
 		{"normal value", 50, 50},
 		{"above max clamped", 5000, maxLimit},
+		{"huge float clamped", 1e18, maxLimit},
+		{"NaN clamped to 0", math.NaN(), 0},
+		{"Inf clamped", math.Inf(1), maxLimit},
+		{"negative Inf clamped to 0", math.Inf(-1), 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
