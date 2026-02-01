@@ -189,13 +189,13 @@ func buildFilterJoinsAndConditions(filter MessageFilter, tableAlias string) (str
 		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_filter_from.display_name), ''), p_filter_from.email_address) = ?")
 		args = append(args, filter.SenderName)
 	} else if filter.MatchEmptySenderName {
-		if filter.Sender == "" && !filter.MatchEmptySender {
-			joins = append(joins, `
-				LEFT JOIN message_recipients mr_filter_from ON mr_filter_from.message_id = m.id AND mr_filter_from.recipient_type = 'from'
-				LEFT JOIN participants p_filter_from ON p_filter_from.id = mr_filter_from.participant_id
-			`)
-		}
-		conditions = append(conditions, "(mr_filter_from.id IS NULL OR COALESCE(NULLIF(TRIM(p_filter_from.display_name), ''), p_filter_from.email_address) IS NULL)")
+		conditions = append(conditions, `NOT EXISTS (
+			SELECT 1 FROM message_recipients mr_sn
+			JOIN participants p_sn ON p_sn.id = mr_sn.participant_id
+			WHERE mr_sn.message_id = m.id
+			  AND mr_sn.recipient_type = 'from'
+			  AND COALESCE(NULLIF(TRIM(p_sn.display_name), ''), p_sn.email_address) IS NOT NULL
+		)`)
 	}
 
 	// Recipient filter
@@ -818,13 +818,13 @@ func (e *SQLiteEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_from.display_name), ''), p_from.email_address) = ?")
 		args = append(args, filter.SenderName)
 	} else if filter.MatchEmptySenderName {
-		if filter.Sender == "" && !filter.MatchEmptySender {
-			joins = append(joins, `
-				LEFT JOIN message_recipients mr_from ON mr_from.message_id = m.id AND mr_from.recipient_type = 'from'
-				LEFT JOIN participants p_from ON p_from.id = mr_from.participant_id
-			`)
-		}
-		conditions = append(conditions, "(mr_from.id IS NULL OR COALESCE(NULLIF(TRIM(p_from.display_name), ''), p_from.email_address) IS NULL)")
+		conditions = append(conditions, `NOT EXISTS (
+			SELECT 1 FROM message_recipients mr_sn
+			JOIN participants p_sn ON p_sn.id = mr_sn.participant_id
+			WHERE mr_sn.message_id = m.id
+			  AND mr_sn.recipient_type = 'from'
+			  AND COALESCE(NULLIF(TRIM(p_sn.display_name), ''), p_sn.email_address) IS NOT NULL
+		)`)
 	}
 
 	// Recipient filter

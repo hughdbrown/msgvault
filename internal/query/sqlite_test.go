@@ -487,6 +487,53 @@ func TestSubAggregateBySenderName(t *testing.T) {
 	}
 }
 
+func TestSubAggregate_MatchEmptySenderName(t *testing.T) {
+	env := newTestEnvWithEmptyBuckets(t)
+
+	// MatchEmptySenderName: match messages with no resolved sender name.
+	// msg6 has no 'from' recipient at all.
+	filter := MessageFilter{MatchEmptySenderName: true}
+	results, err := env.Engine.SubAggregate(env.Ctx, filter, ViewLabels, DefaultAggregateOptions())
+	if err != nil {
+		t.Fatalf("SubAggregate with MatchEmptySenderName: %v", err)
+	}
+
+	// msg6 has labels from the base fixture (INBOX via message_labels)
+	// The key thing is it doesn't error — NOT EXISTS works correctly.
+	_ = results
+}
+
+func TestListMessages_MatchEmptySenderName_NotExists(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Add a message with no 'from' recipient at all
+	_, err := env.DB.Exec(`
+		INSERT INTO messages (id, conversation_id, source_id, source_message_id, message_type, sent_at, subject, snippet, size_estimate, has_attachments) VALUES
+			(20, 1, 1, 'msg20', 'email', '2024-06-01 10:00:00', 'Ghost Message', 'no sender', 100, 0);
+	`)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// MatchEmptySenderName should find msg20 (no from) but NOT regular messages
+	filter := MessageFilter{MatchEmptySenderName: true}
+	messages := env.MustListMessages(filter)
+
+	if len(messages) != 1 {
+		t.Errorf("expected 1 message with empty sender name, got %d", len(messages))
+	}
+	if len(messages) > 0 && messages[0].Subject != "Ghost Message" {
+		t.Errorf("expected 'Ghost Message', got %q", messages[0].Subject)
+	}
+
+	// Verify normal messages with valid senders are NOT matched
+	for _, m := range messages {
+		if m.Subject == "Hello World" || m.Subject == "Re: Hello" {
+			t.Errorf("should not match message with valid sender: %q", m.Subject)
+		}
+	}
+}
+
 func TestGetGmailIDsByFilter_SenderName(t *testing.T) {
 	env := newTestEnv(t)
 

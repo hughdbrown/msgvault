@@ -1155,6 +1155,65 @@ func TestDuckDBEngine_AggregateBySender_DateFilter(t *testing.T) {
 	}
 }
 
+// TestDuckDBEngine_SubAggregate_DateFilter verifies CAST(? AS TIMESTAMP) in SubAggregate.
+func TestDuckDBEngine_SubAggregate_DateFilter(t *testing.T) {
+	engine := newParquetEngine(t)
+	ctx := context.Background()
+
+	feb1 := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	filter := MessageFilter{Sender: "alice@example.com"}
+	opts := DefaultAggregateOptions()
+	opts.After = &feb1
+
+	// Alice sent msg3 (Feb 1) after Feb 1 — sub-aggregate by recipients
+	results, err := engine.SubAggregate(ctx, filter, ViewRecipients, opts)
+	if err != nil {
+		t.Fatalf("SubAggregate with After: %v", err)
+	}
+
+	// msg3 goes to bob -> 1 recipient
+	if len(results) != 1 {
+		t.Errorf("expected 1 recipient after Feb 1 for alice, got %d", len(results))
+	}
+}
+
+// TestDuckDBEngine_SearchFastCount_DateFilter verifies CAST(? AS TIMESTAMP) in SearchFastCount.
+func TestDuckDBEngine_SearchFastCount_DateFilter(t *testing.T) {
+	engine := newParquetEngine(t)
+	ctx := context.Background()
+
+	q := search.Parse("after:2024-02-01")
+	count, err := engine.SearchFastCount(ctx, q, MessageFilter{})
+	if err != nil {
+		t.Fatalf("SearchFastCount: %v", err)
+	}
+
+	// msg3 (Feb 1), msg4 (Feb 15), msg5 (Mar 1) = 3
+	if count != 3 {
+		t.Errorf("SearchFastCount after:2024-02-01: expected 3, got %d", count)
+	}
+}
+
+// TestDuckDBEngine_AggregateByDomain_DateFilter verifies CAST(? AS TIMESTAMP) in buildWhereClause.
+func TestDuckDBEngine_AggregateByDomain_DateFilter(t *testing.T) {
+	engine := newParquetEngine(t)
+	ctx := context.Background()
+
+	feb1 := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	opts := DefaultAggregateOptions()
+	opts.After = &feb1
+
+	// After Feb 1: msg3 from alice (example.com), msg4+msg5 from bob (company.org)
+	results, err := engine.AggregateByDomain(ctx, opts)
+	if err != nil {
+		t.Fatalf("AggregateByDomain with After: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 domains after Feb 1, got %d", len(results))
+	}
+}
+
 // TestDuckDBEngine_ThreadCount verifies that DuckDB is initialized with the correct
 // thread count based on GOMAXPROCS, and that the setting persists (single connection).
 func TestDuckDBEngine_ThreadCount(t *testing.T) {
