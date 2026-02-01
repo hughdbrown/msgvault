@@ -374,7 +374,7 @@ func (e *DuckDBEngine) AggregateBySenderName(ctx context.Context, opts Aggregate
 		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
 		FROM (
 			SELECT
-				COALESCE(p.display_name, p.email_address) as key,
+				COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) as key,
 				COUNT(*) as count,
 				COALESCE(SUM(msg.size_estimate), 0) as total_size,
 				CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
@@ -384,8 +384,8 @@ func (e *DuckDBEngine) AggregateBySenderName(ctx context.Context, opts Aggregate
 			JOIN mr ON mr.message_id = msg.id AND mr.recipient_type = 'from'
 			JOIN p ON p.id = mr.participant_id
 			LEFT JOIN att ON att.message_id = msg.id
-			WHERE %s AND COALESCE(p.display_name, p.email_address) IS NOT NULL
-			GROUP BY COALESCE(p.display_name, p.email_address)
+			WHERE %s AND COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) IS NOT NULL
+			GROUP BY COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address)
 		)
 		%s
 		LIMIT ?
@@ -610,7 +610,7 @@ func (e *DuckDBEngine) buildFilterConditions(filter MessageFilter) (string, []in
 			JOIN p ON p.id = mr.participant_id
 			WHERE mr.message_id = msg.id
 			  AND mr.recipient_type = 'from'
-			  AND COALESCE(p.display_name, p.email_address) = ?
+			  AND COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) = ?
 		)`)
 		args = append(args, filter.SenderName)
 	} else if filter.MatchEmptySenderName {
@@ -619,7 +619,7 @@ func (e *DuckDBEngine) buildFilterConditions(filter MessageFilter) (string, []in
 			JOIN p ON p.id = mr.participant_id
 			WHERE mr.message_id = msg.id
 			  AND mr.recipient_type = 'from'
-			  AND COALESCE(p.display_name, p.email_address) IS NOT NULL
+			  AND COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) IS NOT NULL
 		)`)
 	}
 
@@ -769,7 +769,7 @@ func (e *DuckDBEngine) SubAggregate(ctx context.Context, filter MessageFilter, g
 			SELECT key, count, total_size, attachment_size, attachment_count, total_unique
 			FROM (
 				SELECT
-					COALESCE(p_agg.display_name, p_agg.email_address) as key,
+					COALESCE(NULLIF(TRIM(p_agg.display_name), ''), p_agg.email_address) as key,
 					COUNT(*) as count,
 					COALESCE(SUM(msg.size_estimate), 0) as total_size,
 					CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
@@ -779,8 +779,8 @@ func (e *DuckDBEngine) SubAggregate(ctx context.Context, filter MessageFilter, g
 				JOIN mr mr_agg ON mr_agg.message_id = msg.id AND mr_agg.recipient_type = 'from'
 				JOIN p p_agg ON p_agg.id = mr_agg.participant_id
 				LEFT JOIN att ON att.message_id = msg.id
-				WHERE %s AND COALESCE(p_agg.display_name, p_agg.email_address) IS NOT NULL
-				GROUP BY COALESCE(p_agg.display_name, p_agg.email_address)
+				WHERE %s AND COALESCE(NULLIF(TRIM(p_agg.display_name), ''), p_agg.email_address) IS NOT NULL
+				GROUP BY COALESCE(NULLIF(TRIM(p_agg.display_name), ''), p_agg.email_address)
 			)
 			%s
 			LIMIT ?
@@ -1655,7 +1655,7 @@ func (e *DuckDBEngine) GetGmailIDsByFilter(ctx context.Context, filter MessageFi
 			JOIN p ON p.id = mr.participant_id
 			WHERE mr.message_id = msg.id
 			  AND mr.recipient_type = 'from'
-			  AND COALESCE(p.display_name, p.email_address) = ?
+			  AND COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) = ?
 		)`)
 		args = append(args, filter.SenderName)
 	}

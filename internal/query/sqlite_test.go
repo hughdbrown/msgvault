@@ -383,6 +383,62 @@ func TestAggregateBySenderName_FallbackToEmail(t *testing.T) {
 	}
 }
 
+func TestAggregateBySenderName_EmptyStringFallback(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Add participants with empty-string and whitespace-only display_name
+	_, err := env.DB.Exec(`
+		INSERT INTO participants (id, email_address, display_name, domain) VALUES
+			(11, 'empty@test.com', '', 'test.com'),
+			(12, 'spaces@test.com', '   ', 'test.com');
+		INSERT INTO messages (id, conversation_id, source_id, source_message_id, message_type, sent_at, subject, snippet, size_estimate, has_attachments) VALUES
+			(11, 1, 1, 'msg11', 'email', '2024-05-01 10:00:00', 'Empty Name', 'Test', 100, 0),
+			(12, 1, 1, 'msg12', 'email', '2024-05-02 10:00:00', 'Spaces Name', 'Test', 100, 0);
+		INSERT INTO message_recipients (message_id, participant_id, recipient_type) VALUES
+			(11, 11, 'from'),
+			(12, 12, 'from');
+	`)
+	if err != nil {
+		t.Fatalf("insert test data: %v", err)
+	}
+
+	rows, err := env.Engine.AggregateBySenderName(env.Ctx, DefaultAggregateOptions())
+	if err != nil {
+		t.Fatalf("AggregateBySenderName: %v", err)
+	}
+
+	// Empty and whitespace display_name should fall back to email.
+	// Expected: Alice Smith (3), Bob Jones (2), empty@test.com (1), spaces@test.com (1)
+	if len(rows) != 4 {
+		t.Errorf("expected 4 sender names, got %d", len(rows))
+		for _, r := range rows {
+			t.Logf("  key=%q count=%d", r.Key, r.Count)
+		}
+	}
+
+	// Verify empty-string display_name falls back to email
+	foundEmpty := false
+	foundSpaces := false
+	for _, r := range rows {
+		if r.Key == "empty@test.com" {
+			foundEmpty = true
+		}
+		if r.Key == "spaces@test.com" {
+			foundSpaces = true
+		}
+		// Should NOT appear as "" or "   "
+		if r.Key == "" || r.Key == "   " {
+			t.Errorf("unexpected empty/whitespace key: %q", r.Key)
+		}
+	}
+	if !foundEmpty {
+		t.Error("expected empty@test.com in results (empty-string display_name fallback)")
+	}
+	if !foundSpaces {
+		t.Error("expected spaces@test.com in results (whitespace display_name fallback)")
+	}
+}
+
 func TestListMessages_SenderNameFilter(t *testing.T) {
 	env := newTestEnv(t)
 

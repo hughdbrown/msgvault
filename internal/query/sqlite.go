@@ -186,7 +186,7 @@ func buildFilterJoinsAndConditions(filter MessageFilter, tableAlias string) (str
 				JOIN participants p_filter_from ON p_filter_from.id = mr_filter_from.participant_id
 			`)
 		}
-		conditions = append(conditions, "COALESCE(p_filter_from.display_name, p_filter_from.email_address) = ?")
+		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_filter_from.display_name), ''), p_filter_from.email_address) = ?")
 		args = append(args, filter.SenderName)
 	} else if filter.MatchEmptySenderName {
 		if filter.Sender == "" && !filter.MatchEmptySender {
@@ -195,7 +195,7 @@ func buildFilterJoinsAndConditions(filter MessageFilter, tableAlias string) (str
 				LEFT JOIN participants p_filter_from ON p_filter_from.id = mr_filter_from.participant_id
 			`)
 		}
-		conditions = append(conditions, "(mr_filter_from.id IS NULL OR COALESCE(p_filter_from.display_name, p_filter_from.email_address) IS NULL)")
+		conditions = append(conditions, "(mr_filter_from.id IS NULL OR COALESCE(NULLIF(TRIM(p_filter_from.display_name), ''), p_filter_from.email_address) IS NULL)")
 	}
 
 	// Recipient filter
@@ -339,7 +339,7 @@ func (e *SQLiteEngine) SubAggregate(ctx context.Context, filter MessageFilter, g
 			SELECT key, count, total_size, attachment_size, attachment_count, total_unique
 			FROM (
 				SELECT
-					COALESCE(p.display_name, p.email_address) as key,
+					COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) as key,
 					COUNT(*) as count,
 					COALESCE(SUM(m.size_estimate), 0) as total_size,
 					COALESCE(SUM(att.att_size), 0) as attachment_size,
@@ -354,8 +354,8 @@ func (e *SQLiteEngine) SubAggregate(ctx context.Context, filter MessageFilter, g
 					GROUP BY message_id
 				) att ON att.message_id = m.id
 				%s
-				WHERE %s AND COALESCE(p.display_name, p.email_address) IS NOT NULL
-				GROUP BY COALESCE(p.display_name, p.email_address)
+				WHERE %s AND COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) IS NOT NULL
+				GROUP BY COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address)
 			)
 			%s
 			LIMIT ?
@@ -544,7 +544,7 @@ func (e *SQLiteEngine) AggregateBySenderName(ctx context.Context, opts Aggregate
 		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
 		FROM (
 			SELECT
-				COALESCE(p.display_name, p.email_address) as key,
+				COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) as key,
 				COUNT(*) as count,
 				COALESCE(SUM(m.size_estimate), 0) as total_size,
 				COALESCE(SUM(att.att_size), 0) as attachment_size,
@@ -558,8 +558,8 @@ func (e *SQLiteEngine) AggregateBySenderName(ctx context.Context, opts Aggregate
 				FROM attachments
 				GROUP BY message_id
 			) att ON att.message_id = m.id
-			WHERE %s AND COALESCE(p.display_name, p.email_address) IS NOT NULL
-			GROUP BY COALESCE(p.display_name, p.email_address)
+			WHERE %s AND COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) IS NOT NULL
+			GROUP BY COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address)
 		)
 		%s
 		LIMIT ?
@@ -815,7 +815,7 @@ func (e *SQLiteEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 				JOIN participants p_from ON p_from.id = mr_from.participant_id
 			`)
 		}
-		conditions = append(conditions, "COALESCE(p_from.display_name, p_from.email_address) = ?")
+		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_from.display_name), ''), p_from.email_address) = ?")
 		args = append(args, filter.SenderName)
 	} else if filter.MatchEmptySenderName {
 		if filter.Sender == "" && !filter.MatchEmptySender {
@@ -824,7 +824,7 @@ func (e *SQLiteEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 				LEFT JOIN participants p_from ON p_from.id = mr_from.participant_id
 			`)
 		}
-		conditions = append(conditions, "(mr_from.id IS NULL OR COALESCE(p_from.display_name, p_from.email_address) IS NULL)")
+		conditions = append(conditions, "(mr_from.id IS NULL OR COALESCE(NULLIF(TRIM(p_from.display_name), ''), p_from.email_address) IS NULL)")
 	}
 
 	// Recipient filter
@@ -1416,7 +1416,7 @@ func (e *SQLiteEngine) GetGmailIDsByFilter(ctx context.Context, filter MessageFi
 				JOIN participants p_from ON p_from.id = mr_from.participant_id
 			`)
 		}
-		conditions = append(conditions, "COALESCE(p_from.display_name, p_from.email_address) = ?")
+		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_from.display_name), ''), p_from.email_address) = ?")
 		args = append(args, filter.SenderName)
 	}
 
