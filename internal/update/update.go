@@ -545,8 +545,13 @@ func comparePrerelease(a, b string) int {
 			}
 			continue
 		}
-		// numeric < string in semver, but for our use (alpha1, beta1, rc1)
-		// string compare is fine when types match
+		// Semver: numeric identifiers always have lower precedence than non-numeric
+		if aIsNum != bIsNum {
+			if aIsNum {
+				return -1
+			}
+			return 1
+		}
 		if sa[i] < sb[i] {
 			return -1
 		}

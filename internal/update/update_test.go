@@ -288,8 +288,10 @@ func TestIsNewer(t *testing.T) {
 		{"0.4.0-beta10", "0.4.0-beta2", true}, // beta10 > beta2
 		{"0.4.0-rc1", "0.4.0-beta1", true},  // rc > beta lexicographically
 		{"0.4.0-alpha1", "0.4.0-beta1", false}, // alpha < beta
-		{"0.4.0-rc.2", "0.4.0-rc.1", true},  // dotted prerelease
-		{"0.4.0-beta1", "0.3.9", true},      // prerelease of higher base > lower release
+		{"0.4.0-rc.2", "0.4.0-rc.1", true},    // dotted prerelease
+		{"0.4.0-1", "0.4.0-rc1", false},       // numeric segment < non-numeric (semver rule)
+		{"0.4.0-rc1", "0.4.0-1", true},        // non-numeric > numeric
+		{"0.4.0-beta1", "0.3.9", true},        // prerelease of higher base > lower release
 	}
 
 	for _, tt := range tests {
