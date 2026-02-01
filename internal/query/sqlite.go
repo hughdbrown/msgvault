@@ -213,15 +213,14 @@ func buildFilterJoinsAndConditions(filter MessageFilter, tableAlias string) (str
 		conditions = append(conditions, "mr_filter_to.id IS NULL")
 	}
 
-	// Recipient name filter
+	// Recipient name filter — uses its own aliases (mr_rn_filter/p_rn_filter)
+	// to avoid conflicts with the Recipient filter's mr_filter_to join.
 	if filter.RecipientName != "" {
-		if filter.Recipient == "" && !filter.MatchEmptyRecipient {
-			joins = append(joins, `
-				JOIN message_recipients mr_filter_to ON mr_filter_to.message_id = m.id AND mr_filter_to.recipient_type IN ('to', 'cc')
-				JOIN participants p_filter_to ON p_filter_to.id = mr_filter_to.participant_id
-			`)
-		}
-		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_filter_to.display_name), ''), p_filter_to.email_address) = ?")
+		joins = append(joins, `
+			JOIN message_recipients mr_rn_filter ON mr_rn_filter.message_id = m.id AND mr_rn_filter.recipient_type IN ('to', 'cc')
+			JOIN participants p_rn_filter ON p_rn_filter.id = mr_rn_filter.participant_id
+		`)
+		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_rn_filter.display_name), ''), p_rn_filter.email_address) = ?")
 		args = append(args, filter.RecipientName)
 	} else if filter.MatchEmptyRecipientName {
 		conditions = append(conditions, `NOT EXISTS (
@@ -422,7 +421,7 @@ func (e *SQLiteEngine) SubAggregate(ctx context.Context, filter MessageFilter, g
 					COALESCE(SUM(att.att_count), 0) as attachment_count,
 					COUNT(*) OVER() as total_unique
 				FROM messages m
-				JOIN message_recipients mr ON mr.message_id = m.id AND mr.recipient_type IN ('to', 'cc', 'bcc')
+				JOIN message_recipients mr ON mr.message_id = m.id AND mr.recipient_type IN ('to', 'cc')
 				JOIN participants p ON p.id = mr.participant_id
 				LEFT JOIN (
 					SELECT message_id, SUM(size) as att_size, COUNT(*) as att_count
@@ -678,7 +677,7 @@ func (e *SQLiteEngine) AggregateByRecipientName(ctx context.Context, opts Aggreg
 				COALESCE(SUM(att.att_count), 0) as attachment_count,
 				COUNT(*) OVER() as total_unique
 			FROM messages m
-			JOIN message_recipients mr ON mr.message_id = m.id AND mr.recipient_type IN ('to', 'cc', 'bcc')
+			JOIN message_recipients mr ON mr.message_id = m.id AND mr.recipient_type IN ('to', 'cc')
 			JOIN participants p ON p.id = mr.participant_id
 			LEFT JOIN (
 				SELECT message_id, SUM(size) as att_size, COUNT(*) as att_count
@@ -931,15 +930,14 @@ func (e *SQLiteEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 		conditions = append(conditions, "mr_to.id IS NULL")
 	}
 
-	// Recipient name filter
+	// Recipient name filter — uses its own aliases (mr_rn_filter/p_rn_filter)
+	// to avoid conflicts with the Recipient filter's mr_to join.
 	if filter.RecipientName != "" {
-		if filter.Recipient == "" && !filter.MatchEmptyRecipient {
-			joins = append(joins, `
-				JOIN message_recipients mr_to ON mr_to.message_id = m.id AND mr_to.recipient_type IN ('to', 'cc')
-				JOIN participants p_to ON p_to.id = mr_to.participant_id
-			`)
-		}
-		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_to.display_name), ''), p_to.email_address) = ?")
+		joins = append(joins, `
+			JOIN message_recipients mr_rn_filter ON mr_rn_filter.message_id = m.id AND mr_rn_filter.recipient_type IN ('to', 'cc')
+			JOIN participants p_rn_filter ON p_rn_filter.id = mr_rn_filter.participant_id
+		`)
+		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_rn_filter.display_name), ''), p_rn_filter.email_address) = ?")
 		args = append(args, filter.RecipientName)
 	} else if filter.MatchEmptyRecipientName {
 		conditions = append(conditions, `NOT EXISTS (
@@ -1539,13 +1537,11 @@ func (e *SQLiteEngine) GetGmailIDsByFilter(ctx context.Context, filter MessageFi
 	}
 
 	if filter.RecipientName != "" {
-		if filter.Recipient == "" {
-			joins = append(joins, `
-				JOIN message_recipients mr_to ON mr_to.message_id = m.id AND mr_to.recipient_type IN ('to', 'cc')
-				JOIN participants p_to ON p_to.id = mr_to.participant_id
-			`)
-		}
-		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_to.display_name), ''), p_to.email_address) = ?")
+		joins = append(joins, `
+			JOIN message_recipients mr_rn_filter ON mr_rn_filter.message_id = m.id AND mr_rn_filter.recipient_type IN ('to', 'cc')
+			JOIN participants p_rn_filter ON p_rn_filter.id = mr_rn_filter.participant_id
+		`)
+		conditions = append(conditions, "COALESCE(NULLIF(TRIM(p_rn_filter.display_name), ''), p_rn_filter.email_address) = ?")
 		args = append(args, filter.RecipientName)
 	}
 

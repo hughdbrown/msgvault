@@ -2305,17 +2305,20 @@ func TestListMessages_MatchEmptyRecipientName(t *testing.T) {
 	filter := MessageFilter{MatchEmptyRecipientName: true}
 	messages := env.MustListMessages(filter)
 
-	// msg7 has no recipient at all -> should match
+	// Messages with no to/cc recipients should match
+	if len(messages) == 0 {
+		t.Fatal("expected at least 1 message with empty recipient name, got 0")
+	}
 	found := false
 	for _, m := range messages {
-		if m.Subject == "No Recipient" {
+		if m.Subject == "No Recipients" {
 			found = true
 		}
 	}
-	if !found && len(messages) > 0 {
-		t.Logf("got %d messages:", len(messages))
+	if !found {
+		t.Errorf("expected 'No Recipients' message in results")
 		for _, m := range messages {
-			t.Logf("  %q", m.Subject)
+			t.Logf("  got: %q", m.Subject)
 		}
 	}
 }

@@ -5552,18 +5552,44 @@ func TestTKeyResetsSelectionOnJump(t *testing.T) {
 
 func TestTKeyDoesNotResetSelectionOnCycle(t *testing.T) {
 	model := NewBuilder().
-		WithRows(query.AggregateRow{Key: "2024", Count: 10}).
+		WithRows(query.AggregateRow{Key: "2024", Count: 10}, query.AggregateRow{Key: "2023", Count: 5}).
 		WithPageSize(10).WithSize(100, 20).
 		WithViewType(query.ViewTime).Build()
 	model.timeGranularity = query.TimeYear
+	model.selection.aggregateKeys["2024"] = true
+	model.cursor = 1
+	model.scrollOffset = 0
 
-	// When already in Time view, 't' cycles granularity but doesn't clear selection
+	// When already in Time view, 't' cycles granularity but preserves selection/cursor
 	m := applyAggregateKey(t, model, key('t'))
 	if m.viewType != query.ViewTime {
 		t.Errorf("expected ViewTime, got %v", m.viewType)
 	}
-	// Granularity should have cycled
 	if m.timeGranularity != query.TimeMonth {
 		t.Errorf("expected TimeMonth, got %v", m.timeGranularity)
+	}
+	if !m.selection.aggregateKeys["2024"] {
+		t.Error("expected selection preserved after 't' granularity cycle")
+	}
+	if m.cursor != 1 {
+		t.Errorf("expected cursor=1 preserved, got %d", m.cursor)
+	}
+}
+
+func TestTKeyNoOpInSubAggregateWhenDrillIsTime(t *testing.T) {
+	model := NewBuilder().
+		WithRows(query.AggregateRow{Key: "alice@example.com", Count: 10}).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelDrillDown).WithViewType(query.ViewSenders).Build()
+	model.drillViewType = query.ViewTime
+	model.drillFilter = query.MessageFilter{TimePeriod: "2024"}
+
+	// Press 't' in sub-aggregate where drill was from Time — should be a no-op
+	m := applyAggregateKey(t, model, key('t'))
+	if m.viewType != query.ViewSenders {
+		t.Errorf("expected viewType unchanged (ViewSenders), got %v", m.viewType)
+	}
+	if m.loading {
+		t.Error("expected loading=false (no-op)")
 	}
 }

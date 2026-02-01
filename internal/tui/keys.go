@@ -354,6 +354,9 @@ func (m Model) handleAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "t":
 		if m.viewType == query.ViewTime {
 			m.timeGranularity = (m.timeGranularity + 1) % 3
+		} else if isSub && m.drillViewType == query.ViewTime {
+			// Can't sub-aggregate by the same dimension we drilled from
+			return m, nil
 		} else {
 			m.viewType = query.ViewTime
 			m.selection.aggregateKeys = make(map[string]bool)
