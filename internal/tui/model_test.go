@@ -1271,9 +1271,9 @@ func TestSubGroupingNavigation(t *testing.T) {
 	if m.level != levelDrillDown {
 		t.Errorf("expected levelDrillDown after Tab, got %v", m.level)
 	}
-	// Default sub-group after drilling from Senders should be SenderNames
-	if m.viewType != query.ViewSenderNames {
-		t.Errorf("expected viewType = ViewSenderNames for sub-grouping, got %v", m.viewType)
+	// Default sub-group after drilling from Senders should be Recipients (skips redundant SenderNames)
+	if m.viewType != query.ViewRecipients {
+		t.Errorf("expected viewType = ViewRecipients for sub-grouping, got %v", m.viewType)
 	}
 	if cmd == nil {
 		t.Error("expected command to load sub-aggregate data")
@@ -1284,9 +1284,9 @@ func TestSubGroupingNavigation(t *testing.T) {
 	newModel, cmd = m.handleAggregateKeys(keyTab())
 	m = newModel.(Model)
 
-	// Should skip Senders (drill view type) and go to Recipients
-	if m.viewType != query.ViewRecipients {
-		t.Errorf("expected viewType = ViewRecipients after Tab, got %v", m.viewType)
+	// From ViewRecipients, Tab cycles to ViewRecipientNames
+	if m.viewType != query.ViewRecipientNames {
+		t.Errorf("expected viewType = ViewRecipientNames after Tab, got %v", m.viewType)
 	}
 	if cmd == nil {
 		t.Error("expected command to reload data after Tab")
@@ -1844,9 +1844,108 @@ func TestGKeyInMessageListWithDrillFilter(t *testing.T) {
 	if m.level != levelDrillDown {
 		t.Errorf("expected level=levelDrillDown after 'g' with drill filter, got %v", m.level)
 	}
-	// ViewType should be next logical view (SenderNames after Senders)
-	if m.viewType != query.ViewSenderNames {
-		t.Errorf("expected viewType=SenderNames after 'g', got %v", m.viewType)
+	// ViewType should be next logical view (Recipients after Senders, skipping SenderNames)
+	if m.viewType != query.ViewRecipients {
+		t.Errorf("expected viewType=Recipients after 'g', got %v", m.viewType)
+	}
+}
+
+// TestNextSubGroupViewSkipsSenderNames verifies that drilling from Senders
+// skips SenderNames (redundant) and goes straight to Recipients.
+func TestNextSubGroupViewSkipsSenderNames(t *testing.T) {
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "Test 1"},
+		).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).WithViewType(query.ViewSenders).
+		Build()
+	model.drillFilter = query.MessageFilter{Sender: "alice@example.com"}
+	model.drillViewType = query.ViewSenders
+
+	m := applyMessageListKey(t, model, key('g'))
+
+	if m.viewType != query.ViewRecipients {
+		t.Errorf("expected sub-group from Senders to be Recipients (skip SenderNames), got %v", m.viewType)
+	}
+}
+
+// TestNextSubGroupViewSkipsRecipientNames verifies that drilling from Recipients
+// skips RecipientNames (redundant) and goes straight to Domains.
+func TestNextSubGroupViewSkipsRecipientNames(t *testing.T) {
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "Test 1"},
+		).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).WithViewType(query.ViewRecipients).
+		Build()
+	model.drillFilter = query.MessageFilter{Recipient: "bob@example.com"}
+	model.drillViewType = query.ViewRecipients
+
+	m := applyMessageListKey(t, model, key('g'))
+
+	if m.viewType != query.ViewDomains {
+		t.Errorf("expected sub-group from Recipients to be Domains (skip RecipientNames), got %v", m.viewType)
+	}
+}
+
+// TestNextSubGroupViewFromSenderNamesKeepsRecipients verifies that drilling from
+// SenderNames goes to Recipients (name→email sub-grouping is useful).
+func TestNextSubGroupViewFromSenderNamesKeepsRecipients(t *testing.T) {
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "Test 1"},
+		).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).WithViewType(query.ViewSenderNames).
+		Build()
+	model.drillFilter = query.MessageFilter{SenderName: "Alice"}
+	model.drillViewType = query.ViewSenderNames
+
+	m := applyMessageListKey(t, model, key('g'))
+
+	if m.viewType != query.ViewRecipients {
+		t.Errorf("expected sub-group from SenderNames to be Recipients, got %v", m.viewType)
+	}
+}
+
+// TestNextSubGroupViewFromRecipientNamesKeepsDomains verifies that drilling from
+// RecipientNames goes to Domains.
+func TestNextSubGroupViewFromRecipientNamesKeepsDomains(t *testing.T) {
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "Test 1"},
+		).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).WithViewType(query.ViewRecipientNames).
+		Build()
+	model.drillFilter = query.MessageFilter{RecipientName: "Bob"}
+	model.drillViewType = query.ViewRecipientNames
+
+	m := applyMessageListKey(t, model, key('g'))
+
+	if m.viewType != query.ViewDomains {
+		t.Errorf("expected sub-group from RecipientNames to be Domains, got %v", m.viewType)
+	}
+}
+
+// TestNextSubGroupViewFromDomainsGoesToLabels verifies the standard chain continues.
+func TestNextSubGroupViewFromDomainsGoesToLabels(t *testing.T) {
+	model := NewBuilder().
+		WithMessages(
+			query.MessageSummary{ID: 1, Subject: "Test 1"},
+		).
+		WithPageSize(10).WithSize(100, 20).
+		WithLevel(levelMessageList).WithViewType(query.ViewDomains).
+		Build()
+	model.drillFilter = query.MessageFilter{Domain: "example.com"}
+	model.drillViewType = query.ViewDomains
+
+	m := applyMessageListKey(t, model, key('g'))
+
+	if m.viewType != query.ViewLabels {
+		t.Errorf("expected sub-group from Domains to be Labels, got %v", m.viewType)
 	}
 }
 
@@ -3035,9 +3134,9 @@ func TestViewTypeRestoredAfterEscFromSubAggregate(t *testing.T) {
 	if m.level != levelDrillDown {
 		t.Fatalf("expected levelDrillDown, got %v", m.level)
 	}
-	// viewType should have changed to next sub-group view (SenderNames)
-	if m.viewType != query.ViewSenderNames {
-		t.Errorf("expected ViewSenderNames in sub-aggregate, got %v", m.viewType)
+	// viewType should have changed to next sub-group view (Recipients, skipping redundant SenderNames)
+	if m.viewType != query.ViewRecipients {
+		t.Errorf("expected ViewRecipients in sub-aggregate, got %v", m.viewType)
 	}
 
 	// Press Esc to go back to message list

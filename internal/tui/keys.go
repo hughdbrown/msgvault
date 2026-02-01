@@ -390,15 +390,17 @@ func (m Model) handleAggregateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // nextSubGroupView returns the next logical sub-group view type.
-// After drilling into Senders, default to Recipients; after Recipients, default to Domains, etc.
+// Skips the "Name" variant when drilling from the corresponding email view,
+// since an email address almost always maps to exactly one display name.
+// The reverse (Name → email) is kept because one name can have multiple emails.
 func (m Model) nextSubGroupView(current query.ViewType) query.ViewType {
 	switch current {
 	case query.ViewSenders:
-		return query.ViewSenderNames
+		return query.ViewRecipients // skip SenderNames (redundant from email drill)
 	case query.ViewSenderNames:
 		return query.ViewRecipients
 	case query.ViewRecipients:
-		return query.ViewRecipientNames
+		return query.ViewDomains // skip RecipientNames (redundant from email drill)
 	case query.ViewRecipientNames:
 		return query.ViewDomains
 	case query.ViewDomains:
