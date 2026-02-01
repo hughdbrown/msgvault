@@ -1050,6 +1050,10 @@ func (m *Model) restorePreSearchSnapshot() tea.Cmd {
 	m.scrollOffset = m.preSearchScrollOffset
 	m.contextStats = m.preSearchContextStats
 	m.loading = false
+	m.searchLoadingMore = false
+	m.inlineSearchLoading = false
+	m.searchOffset = 0
+	m.searchTotalCount = 0
 	// Clear the snapshot
 	m.preSearchMessages = nil
 	m.preSearchContextStats = nil
@@ -1062,7 +1066,13 @@ func (m *Model) activateInlineSearch(placeholder string) tea.Cmd {
 		m.preSearchMessages = m.messages
 		m.preSearchCursor = m.cursor
 		m.preSearchScrollOffset = m.scrollOffset
-		m.preSearchContextStats = m.contextStats
+		// Deep copy stats to avoid aliasing with mutations during search
+		if m.contextStats != nil {
+			tmp := *m.contextStats
+			m.preSearchContextStats = &tmp
+		} else {
+			m.preSearchContextStats = nil
+		}
 	}
 	m.inlineSearchActive = true
 	m.searchMode = searchModeFast

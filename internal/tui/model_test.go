@@ -2856,6 +2856,157 @@ func TestStaleSearchResponseIgnoredAfterDrillDown(t *testing.T) {
 	}
 }
 
+// TestPreSearchSnapshotRestoreOnEsc verifies that activating inline search at the
+// message list level snapshots state, and Esc restores it instantly without re-query.
+func TestPreSearchSnapshotRestoreOnEsc(t *testing.T) {
+	originalMsgs := []query.MessageSummary{{ID: 1, Subject: "Msg1"}, {ID: 2, Subject: "Msg2"}}
+	originalStats := &query.TotalStats{MessageCount: 100, TotalSize: 5000}
+
+	model := NewBuilder().WithMessages(originalMsgs...).
+		WithLevel(levelMessageList).WithSize(100, 24).Build()
+	model.messages = originalMsgs
+	model.cursor = 1
+	model.scrollOffset = 0
+	model.contextStats = originalStats
+
+	// Activate inline search — should snapshot
+	model.activateInlineSearch("search")
+
+	// Verify snapshot was taken
+	if model.preSearchMessages == nil {
+		t.Fatal("expected preSearchMessages to be set")
+	}
+
+	// Simulate search results arriving — mutates contextStats and replaces messages
+	model.searchQuery = "test"
+	model.messages = []query.MessageSummary{{ID: 99, Subject: "SearchResult"}}
+	model.cursor = 0
+	model.contextStats.MessageCount = 1 // Mutate original pointer
+	model.searchLoadingMore = true
+	model.searchOffset = 50
+	model.searchTotalCount = 200
+
+	// Esc from inline search — should restore snapshot
+	newModel, _ := model.handleInlineSearchKeys(keyEsc())
+	m := newModel.(Model)
+
+	// Messages restored
+	if len(m.messages) != 2 {
+		t.Errorf("expected 2 messages restored, got %d", len(m.messages))
+	}
+	if m.messages[0].ID != 1 {
+		t.Errorf("expected first message ID=1, got %d", m.messages[0].ID)
+	}
+
+	// Cursor restored
+	if m.cursor != 1 {
+		t.Errorf("expected cursor=1, got %d", m.cursor)
+	}
+
+	// Stats restored (deep copy: original mutation shouldn't affect snapshot)
+	if m.contextStats == nil {
+		t.Fatal("expected contextStats restored")
+	}
+	if m.contextStats.MessageCount != 100 {
+		t.Errorf("expected MessageCount=100, got %d", m.contextStats.MessageCount)
+	}
+
+	// Search state fully cleared
+	if m.searchQuery != "" {
+		t.Errorf("expected searchQuery cleared, got %q", m.searchQuery)
+	}
+	if m.searchLoadingMore {
+		t.Error("expected searchLoadingMore=false after restore")
+	}
+	if m.searchOffset != 0 {
+		t.Errorf("expected searchOffset=0, got %d", m.searchOffset)
+	}
+	if m.searchTotalCount != 0 {
+		t.Errorf("expected searchTotalCount=0, got %d", m.searchTotalCount)
+	}
+	if m.loading {
+		t.Error("expected loading=false after restore")
+	}
+
+	// Snapshot cleared
+	if m.preSearchMessages != nil {
+		t.Error("expected preSearchMessages cleared after restore")
+	}
+}
+
+// TestTwoStepEscClearsSearchThenGoesBack verifies that the first Esc clears
+// the inner search and the second Esc navigates back via goBack.
+func TestTwoStepEscClearsSearchThenGoesBack(t *testing.T) {
+	// Start at aggregate level, drill down, then search at message list level
+	model := newTestModelWithRows(testAggregateRows)
+	model.level = levelAggregates
+	model.cursor = 0
+
+	// Drill down to message list
+	newModel, _ := model.handleAggregateKeys(keyEnter())
+	m := newModel.(Model)
+	m.messages = []query.MessageSummary{{ID: 1}, {ID: 2}, {ID: 3}}
+	m.loading = false
+
+	// Activate search and simulate results
+	m.activateInlineSearch("search")
+	m.inlineSearchActive = false // Simulate search submitted
+	m.searchQuery = "test"
+	m.messages = []query.MessageSummary{{ID: 99}}
+
+	// First Esc — should clear search and restore pre-search messages
+	newModel2, _ := m.handleMessageListKeys(keyEsc())
+	m2 := newModel2.(Model)
+
+	if m2.searchQuery != "" {
+		t.Errorf("expected searchQuery cleared after first Esc, got %q", m2.searchQuery)
+	}
+	if m2.level != levelMessageList {
+		t.Errorf("expected still at levelMessageList after first Esc, got %v", m2.level)
+	}
+	if len(m2.messages) != 3 {
+		t.Errorf("expected 3 pre-search messages restored, got %d", len(m2.messages))
+	}
+
+	// Second Esc — should goBack to aggregates
+	newModel3, _ := m2.handleMessageListKeys(keyEsc())
+	m3 := newModel3.(Model)
+
+	if m3.level != levelAggregates {
+		t.Errorf("expected levelAggregates after second Esc, got %v", m3.level)
+	}
+}
+
+// TestHighlightedColumnsAligned verifies that highlighting search terms in
+// aggregate rows doesn't break column alignment.
+func TestHighlightedColumnsAligned(t *testing.T) {
+	rows := []query.AggregateRow{
+		{Key: "alice@example.com", Count: 42, TotalSize: 1024000, AttachmentSize: 512},
+		{Key: "bob@example.com", Count: 7, TotalSize: 2048, AttachmentSize: 0},
+	}
+	model := NewBuilder().WithRows(rows...).
+		WithLevel(levelAggregates).WithSize(100, 24).Build()
+
+	// Render without search
+	noSearchOutput := model.aggregateTableView()
+	noSearchLines := strings.Split(noSearchOutput, "\n")
+
+	// Render with search highlighting "alice"
+	model.searchQuery = "alice"
+	highlightOutput := model.aggregateTableView()
+	highlightLines := strings.Split(highlightOutput, "\n")
+
+	// Compare visible widths — should be identical for each corresponding line
+	for i := 0; i < len(noSearchLines) && i < len(highlightLines); i++ {
+		noSearchWidth := lipgloss.Width(noSearchLines[i])
+		highlightWidth := lipgloss.Width(highlightLines[i])
+		if noSearchWidth != highlightWidth {
+			t.Errorf("line %d: width without search=%d, with highlight=%d\n  no search: %q\n  highlight: %q",
+				i, noSearchWidth, highlightWidth, noSearchLines[i], highlightLines[i])
+		}
+	}
+}
+
 // TestViewTypeRestoredAfterEscFromSubAggregate verifies viewType is restored when
 // navigating back from sub-aggregate to message list.
 func TestViewTypeRestoredAfterEscFromSubAggregate(t *testing.T) {
