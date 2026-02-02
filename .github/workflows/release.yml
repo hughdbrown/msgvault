@@ -154,7 +154,7 @@ jobs:
         uses: msys2/setup-msys2@4f806de0a5a7294ffabaff804b38a9b435a73bda # v2.30.0
         with:
           msystem: MINGW64
-          install: mingw-w64-x86_64-gcc
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-lld
 
       - name: Build
         shell: pwsh
@@ -167,7 +167,7 @@ jobs:
           $VERSION = "${{ github.ref_name }}".TrimStart("v")
 
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $LDFLAGS = "-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION} -extldflags '-Wl,--no-keep-memory'"
+          $LDFLAGS = "-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION} -extldflags '-fuse-ld=lld'"
           go build -tags fts5 -trimpath -ldflags="$LDFLAGS" -o dist/msgvault.exe ./cmd/msgvault
           if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
