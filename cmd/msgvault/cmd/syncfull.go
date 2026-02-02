@@ -192,12 +192,18 @@ type CLIProgress struct {
 }
 
 func (p *CLIProgress) OnStart(total int64) {
-	p.startTime = time.Now()
-	p.lastPrint = time.Now()
+	now := time.Now()
+	p.startTime = now
+	p.lastPrint = now
 	// Don't print Gmail's estimate - it's often wildly inaccurate
 }
 
 func (p *CLIProgress) OnProgress(processed, added, skipped int64) {
+	if p.startTime.IsZero() {
+		now := time.Now()
+		p.startTime = now
+		p.lastPrint = now
+	}
 	p.processed = processed
 	p.added = added
 	p.skipped = skipped
@@ -205,6 +211,11 @@ func (p *CLIProgress) OnProgress(processed, added, skipped int64) {
 }
 
 func (p *CLIProgress) OnLatestDate(date time.Time) {
+	if p.startTime.IsZero() {
+		now := time.Now()
+		p.startTime = now
+		p.lastPrint = now
+	}
 	p.latestDate = date
 	p.printProgress()
 }
@@ -217,7 +228,10 @@ func (p *CLIProgress) printProgress() {
 	p.lastPrint = time.Now()
 
 	elapsed := time.Since(p.startTime)
-	rate := float64(p.added) / elapsed.Seconds()
+	rate := 0.0
+	if elapsed.Seconds() >= 1 {
+		rate = float64(p.added) / elapsed.Seconds()
+	}
 
 	// Format elapsed time nicely
 	elapsedStr := formatDuration(elapsed)
