@@ -1067,6 +1067,14 @@ func (m Model) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.modal = modalNone
 			m.helpScroll = 0
 		}
+		// Clamp scroll to prevent overscroll
+		if maxScroll := helpLineCount - m.helpMaxVisible(); maxScroll > 0 {
+			if m.helpScroll > maxScroll {
+				m.helpScroll = maxScroll
+			}
+		} else {
+			m.helpScroll = 0
+		}
 	}
 
 	return m, nil

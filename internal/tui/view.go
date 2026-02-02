@@ -1355,6 +1355,22 @@ func min(a, b int) int {
 }
 
 // overlayModal renders a modal dialog over the content.
+// helpLineCount is the number of lines in the help modal content.
+// Must be kept in sync with the helpLines slice in overlayModal.
+const helpLineCount = 31
+
+// helpMaxVisible returns the max visible lines for the help modal given terminal height.
+func (m Model) helpMaxVisible() int {
+	v := m.height - 6
+	if v < 1 {
+		v = 1
+	}
+	if v > helpLineCount {
+		v = helpLineCount
+	}
+	return v
+}
+
 func (m Model) overlayModal(background string) string {
 	var modalContent string
 
@@ -1449,14 +1465,8 @@ func (m Model) overlayModal(background string) string {
 		helpLines = append(helpLines, "")
 		helpLines = append(helpLines, "[↑/↓] Scroll  [Any other key] Close")
 
-		// Scrollable window: leave room for modal border/padding
-		maxVisible := m.height - 6
-		if maxVisible < 5 {
-			maxVisible = 5
-		}
-		if maxVisible > len(helpLines) {
-			maxVisible = len(helpLines)
-		}
+		// Scrollable window
+		maxVisible := m.helpMaxVisible()
 
 		// Clamp scroll offset
 		maxScroll := len(helpLines) - maxVisible
