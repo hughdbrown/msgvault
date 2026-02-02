@@ -99,7 +99,7 @@ Performance:
 		}
 
 		// Create and run TUI
-		model := tui.New(engine, tui.Options{DataDir: cfg.Data.DataDir, Version: Commit})
+		model := tui.New(engine, tui.Options{DataDir: cfg.Data.DataDir, Version: Version})
 		p := tea.NewProgram(model, tea.WithAltScreen())
 
 		if _, err := p.Run(); err != nil {
