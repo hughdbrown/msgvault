@@ -19,6 +19,12 @@ func testManager(t *testing.T) *Manager {
 	return mgr
 }
 
+// newTestManifest creates a Manifest directly with the given description and IDs.
+func newTestManifest(t *testing.T, desc string, ids ...string) *Manifest {
+	t.Helper()
+	return NewManifest(desc, ids)
+}
+
 // createTestManifest creates a manifest via the manager with default IDs.
 func createTestManifest(t *testing.T, mgr *Manager, desc string) *Manifest {
 	t.Helper()
