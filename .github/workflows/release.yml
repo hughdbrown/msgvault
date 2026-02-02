@@ -142,6 +142,9 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -149,40 +152,29 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Set up MinGW
-        id: msys2
-        uses: msys2/setup-msys2@4f806de0a5a7294ffabaff804b38a9b435a73bda # v2.30.0
-        with:
-          msystem: MINGW64
-          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-lld
-
       - name: Build
-        shell: pwsh
         env:
           GOOS: windows
           GOARCH: amd64
           CGO_ENABLED: '1'
-          CC: ${{ steps.msys2.outputs.msys2-location }}\mingw64\bin\gcc.exe
         run: |
-          $VERSION = "${{ github.ref_name }}".TrimStart("v")
+          VERSION="${GITHUB_REF#refs/tags/v}"
 
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $LDFLAGS = "-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION} -extldflags '-fuse-ld=lld'"
+          mkdir -p dist
+          LDFLAGS="-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION}"
           go build -tags fts5 -trimpath -ldflags="$LDFLAGS" -o dist/msgvault.exe ./cmd/msgvault
-          if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
-          # Smoke test — check exit code explicitly, then verify version string
-          Write-Host "--- Smoke test ---"
-          & dist/msgvault.exe version 2>&1 | Tee-Object -Variable SMOKE_OUT | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "FATAL: msgvault.exe version exited with code $LASTEXITCODE" }
-          $SMOKE_OUT = $SMOKE_OUT | Out-String
-          Write-Host $SMOKE_OUT
-          if ($SMOKE_OUT -notmatch "v${VERSION}") { throw "FATAL: version output doesn't match tag" }
+          # Smoke test
+          echo "--- Smoke test ---"
+          SMOKE_OUT=$(dist/msgvault.exe version 2>&1)
+          echo "$SMOKE_OUT"
+          echo "$SMOKE_OUT" | grep -q "v${VERSION}" || { echo "FATAL: version output doesn't match tag"; exit 1; }
 
           # Package as zip
-          $ARCHIVE = "msgvault_${VERSION}_windows_amd64.zip"
-          Compress-Archive -Path dist/msgvault.exe -DestinationPath "dist/$ARCHIVE"
-          Remove-Item dist/msgvault.exe
+          ARCHIVE="msgvault_${VERSION}_windows_amd64.zip"
+          cd dist
+          powershell -Command "Compress-Archive -Path msgvault.exe -DestinationPath '$ARCHIVE'"
+          rm msgvault.exe
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
