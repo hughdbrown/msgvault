@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -497,11 +498,33 @@ func TestGetAttachment(t *testing.T) {
 	})
 
 	t.Run("oversized attachment", func(t *testing.T) {
-		// Create a stub file and a handler where stat reports a large size.
-		// We test the stat-based rejection by creating a real file > maxAttachmentSize
-		// would be impractical, so instead test that the error message mentions "too large"
-		// by using a stub attachment pointing to a known file and checking the code path.
-		// For a true integration test, the stat path is exercised by "valid" test above.
+		bigHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		bigDir := filepath.Join(tmpDir, bigHash[:2])
+		os.MkdirAll(bigDir, 0o755)
+		bigFile, err := os.Create(filepath.Join(bigDir, bigHash))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Create sparse file just over the limit.
+		if err := bigFile.Truncate(maxAttachmentSize + 1); err != nil {
+			bigFile.Close()
+			t.Fatal(err)
+		}
+		bigFile.Close()
+
+		eng2 := &stubEngine{
+			attachments: map[int64]*query.AttachmentInfo{
+				40: {ID: 40, Filename: "huge.bin", MimeType: "application/octet-stream", Size: maxAttachmentSize + 1, ContentHash: bigHash},
+			},
+		}
+		h2 := &handlers{engine: eng2, attachmentsDir: tmpDir}
+		r := callTool(t, h2, "get_attachment", map[string]any{"attachment_id": float64(40)})
+		if !r.IsError {
+			t.Fatal("expected error for oversized attachment")
+		}
+		if txt := resultText(t, r); !strings.Contains(txt, "too large") {
+			t.Fatalf("expected 'too large' error, got: %s", txt)
+		}
 	})
 
 	t.Run("file not on disk", func(t *testing.T) {

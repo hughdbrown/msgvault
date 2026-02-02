@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -108,8 +109,14 @@ func (h *handlers) getAttachment(ctx context.Context, req mcp.CallToolRequest) (
 
 	filePath := filepath.Join(h.attachmentsDir, att.ContentHash[:2], att.ContentHash)
 
-	// Check size before reading to avoid loading oversized files into memory.
-	info, err := os.Stat(filePath)
+	// Open file and check size on the open fd to avoid TOCTOU races.
+	f, err := os.Open(filePath)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("attachment file not available: %v", err)), nil
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("attachment file not available: %v", err)), nil
 	}
@@ -117,9 +124,12 @@ func (h *handlers) getAttachment(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError(fmt.Sprintf("attachment too large: %d bytes (max %d)", info.Size(), maxAttachmentSize)), nil
 	}
 
-	data, err := os.ReadFile(filePath)
+	data, err := io.ReadAll(io.LimitReader(f, maxAttachmentSize+1))
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("attachment file not available: %v", err)), nil
+	}
+	if int64(len(data)) > maxAttachmentSize {
+		return mcp.NewToolResultError(fmt.Sprintf("attachment too large: %d bytes (max %d)", len(data), maxAttachmentSize)), nil
 	}
 
 	resp := struct {
