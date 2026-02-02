@@ -10,14 +10,14 @@ permissions:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - goarch: amd64
-            zig_target: x86_64-linux-musl
+            runner: ubuntu-latest
           - goarch: arm64
-            zig_target: aarch64-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -26,72 +26,27 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install zig
-        run: |
-          ZIG_VERSION="0.14.0"
-          ZIG_SHA256="473ec26806133cf4d1918caf1a410f8403a13d979726a9045b421b685031a982"
-          ZIG_TARBALL="zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
-          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" -o "$ZIG_TARBALL"
-          echo "${ZIG_SHA256}  ${ZIG_TARBALL}" | sha256sum -c - || { echo "FATAL: zig checksum mismatch"; exit 1; }
-          tar -xJf "$ZIG_TARBALL"
-          echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> $GITHUB_PATH
-
       - name: Build
         env:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
-          CC: zigcc
-          CXX: zigcxx
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
 
-          # Create zig cc/cxx wrappers that target musl for fully static binaries
-          mkdir -p /tmp/zigbin
-          cat > /tmp/zigbin/zigcc << 'ZIGEOF'
-          #!/bin/bash
-          exec zig cc -target $ZIG_TARGET "$@"
-          ZIGEOF
-          cat > /tmp/zigbin/zigcxx << 'ZIGEOF'
-          #!/bin/bash
-          exec zig c++ -target $ZIG_TARGET "$@"
-          ZIGEOF
-          chmod +x /tmp/zigbin/zigcc /tmp/zigbin/zigcxx
-          export PATH="/tmp/zigbin:$PATH"
-          export ZIG_TARGET="${{ matrix.zig_target }}"
-          export CC=zigcc
-          export CXX=zigcxx
-
           mkdir -p dist
-          LDFLAGS="-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION} -linkmode external -extldflags '-static -lstdc++ -lm'"
+          LDFLAGS="-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION}"
           go build -tags fts5 -trimpath -ldflags="$LDFLAGS" -o dist/msgvault ./cmd/msgvault
 
-          # Verify the binary is statically linked (fail build if not)
-          echo "--- Binary type ---"
+          echo "--- Binary info ---"
           file dist/msgvault
-          file dist/msgvault | grep -qE "statically linked|static-pie linked" || { echo "FATAL: binary is not statically linked"; exit 1; }
+          ldd dist/msgvault || true
 
-          echo "--- Dynamic dependencies ---"
-          # readelf is the most reliable check: no NEEDED entries means no shared libs
-          if command -v readelf &>/dev/null; then
-            NEEDED=$(readelf -d dist/msgvault 2>/dev/null | grep NEEDED || true)
-            echo "$NEEDED"
-            if [ -n "$NEEDED" ]; then
-              echo "FATAL: binary has dynamic library dependencies:"
-              echo "$NEEDED"
-              exit 1
-            fi
-          fi
-          LDD_OUT=$(ldd dist/msgvault 2>&1 || true)
-          echo "$LDD_OUT"
-
-          # Smoke test on native arch (amd64 only — arm64 is cross-compiled)
-          if [ "${{ matrix.goarch }}" = "amd64" ]; then
-            echo "--- Smoke test ---"
-            SMOKE_OUT=$(dist/msgvault version 2>&1)
-            echo "$SMOKE_OUT"
-            echo "$SMOKE_OUT" | grep -q "v${VERSION}" || { echo "FATAL: version output doesn't match tag"; exit 1; }
-          fi
+          # Smoke test — both architectures build natively now
+          echo "--- Smoke test ---"
+          SMOKE_OUT=$(dist/msgvault version 2>&1)
+          echo "$SMOKE_OUT"
+          echo "$SMOKE_OUT" | grep -q "v${VERSION}" || { echo "FATAL: version output doesn't match tag"; exit 1; }
 
           cd dist
           ARCHIVE="msgvault_${VERSION}_linux_${{ matrix.goarch }}.tar.gz"
