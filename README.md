@@ -1,12 +1,14 @@
 # msgvault
 
-[![Go 1.21+](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go)](https://go.dev)
+[![Go 1.25+](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/Docs-msgvault.io-blue)](https://msgvault.io)
 
 [Documentation](https://msgvault.io) · [Setup Guide](https://msgvault.io/guides/oauth-setup/) · [Interactive TUI](https://msgvault.io/usage/tui/)
 
-An offline Gmail archive tool that exports and stores your email data locally with full-text search. Sync is read-only — msgvault never modifies your Gmail.
+> **Pre-alpha software.** APIs, storage format, and CLI flags may change without notice. Back up your data.
+
+An offline Gmail archive tool that exports and stores your email data locally with full-text search. Sync commands are read-only. Deletion is a separate, explicit workflow that requires user confirmation — see the [documentation](https://msgvault.io) for details. The app requests `gmail.modify` scope to support deletion staging.
 
 ## Why msgvault?
 
@@ -25,7 +27,7 @@ Gmail holds decades of correspondence, but there's no easy way to keep a searcha
 
 ## Installation
 
-Requires **Go 1.21+** and a C compiler (GCC/Clang) for CGO.
+Requires **Go 1.25+** and a C compiler (GCC/Clang) for CGO.
 
 ```bash
 git clone https://github.com/wesm/msgvault.git
