@@ -66,6 +66,10 @@ func (m *mockEngine) GetMessageBySourceID(ctx context.Context, sourceMessageID s
 	return m.messageDetail, nil
 }
 
+func (m *mockEngine) GetAttachment(ctx context.Context, id int64) (*query.AttachmentInfo, error) {
+	return nil, nil
+}
+
 func (m *mockEngine) Search(ctx context.Context, q *search.Query, limit, offset int) ([]query.MessageSummary, error) {
 	return m.messages, nil
 }

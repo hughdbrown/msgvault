@@ -1395,6 +1395,23 @@ func (e *SQLiteEngine) fetchAttachments(ctx context.Context, msg *MessageDetail)
 	return rows.Err()
 }
 
+// GetAttachment retrieves attachment metadata by ID.
+func (e *SQLiteEngine) GetAttachment(ctx context.Context, id int64) (*AttachmentInfo, error) {
+	var att AttachmentInfo
+	err := e.db.QueryRowContext(ctx, `
+		SELECT id, COALESCE(filename, ''), COALESCE(mime_type, ''), COALESCE(size, 0), COALESCE(content_hash, '')
+		FROM attachments
+		WHERE id = ?
+	`, id).Scan(&att.ID, &att.Filename, &att.MimeType, &att.Size, &att.ContentHash)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get attachment: %w", err)
+	}
+	return &att, nil
+}
+
 // ListAccounts returns all source accounts.
 func (e *SQLiteEngine) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
 	rows, err := e.db.QueryContext(ctx, `

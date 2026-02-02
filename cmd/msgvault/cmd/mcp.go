@@ -59,7 +59,7 @@ Add to Claude Desktop config:
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		return mcpserver.Serve(ctx, engine)
+		return mcpserver.Serve(ctx, engine, cfg.AttachmentsDir())
 	},
 }
 

@@ -1424,6 +1424,15 @@ func (e *DuckDBEngine) GetMessageBySourceID(ctx context.Context, sourceMessageID
 	return e.getMessageByQuery(ctx, "m.source_message_id = ?", sourceMessageID)
 }
 
+// GetAttachment retrieves attachment metadata by ID.
+// Attachments live in SQLite, so delegate to the SQLite engine.
+func (e *DuckDBEngine) GetAttachment(ctx context.Context, id int64) (*AttachmentInfo, error) {
+	if e.sqliteEngine != nil {
+		return e.sqliteEngine.GetAttachment(ctx, id)
+	}
+	return nil, fmt.Errorf("GetAttachment requires SQLite: pass sqliteDB to NewDuckDBEngine")
+}
+
 func (e *DuckDBEngine) getMessageByQuery(ctx context.Context, whereClause string, args ...interface{}) (*MessageDetail, error) {
 	query := fmt.Sprintf(`
 		SELECT

@@ -31,6 +31,7 @@ type Engine interface {
 	ListMessages(ctx context.Context, filter MessageFilter) ([]MessageSummary, error)
 	GetMessage(ctx context.Context, id int64) (*MessageDetail, error)
 	GetMessageBySourceID(ctx context.Context, sourceMessageID string) (*MessageDetail, error)
+	GetAttachment(ctx context.Context, id int64) (*AttachmentInfo, error)
 
 	// Search - full-text search using FTS5 (includes message body)
 	Search(ctx context.Context, query *search.Query, limit, offset int) ([]MessageSummary, error)

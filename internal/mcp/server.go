@@ -11,17 +11,18 @@ import (
 
 // Serve creates an MCP server with email archive tools and serves over stdio.
 // It blocks until stdin is closed or the context is cancelled.
-func Serve(ctx context.Context, engine query.Engine) error {
+func Serve(ctx context.Context, engine query.Engine, attachmentsDir string) error {
 	s := server.NewMCPServer(
 		"msgvault",
 		"1.0.0",
 		server.WithToolCapabilities(false),
 	)
 
-	h := &handlers{engine: engine}
+	h := &handlers{engine: engine, attachmentsDir: attachmentsDir}
 
 	s.AddTool(searchMessagesTool(), h.searchMessages)
 	s.AddTool(getMessageTool(), h.getMessage)
+	s.AddTool(getAttachmentTool(), h.getAttachment)
 	s.AddTool(listMessagesTool(), h.listMessages)
 	s.AddTool(getStatsTool(), h.getStats)
 	s.AddTool(aggregateTool(), h.aggregate)
@@ -54,6 +55,17 @@ func getMessageTool() mcp.Tool {
 		mcp.WithNumber("id",
 			mcp.Required(),
 			mcp.Description("Message ID"),
+		),
+	)
+}
+
+func getAttachmentTool() mcp.Tool {
+	return mcp.NewTool("get_attachment",
+		mcp.WithDescription("Get attachment content by attachment ID. Returns base64-encoded content with metadata. Use get_message first to find attachment IDs."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithNumber("attachment_id",
+			mcp.Required(),
+			mcp.Description("Attachment ID (from get_message response)"),
 		),
 	)
 }

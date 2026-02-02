@@ -217,6 +217,7 @@ func (e *stubEngine) SubAggregate(context.Context, query.MessageFilter, query.Vi
 func (e *stubEngine) ListMessages(context.Context, query.MessageFilter) ([]query.MessageSummary, error) { return nil, nil }
 func (e *stubEngine) GetMessageBySourceID(context.Context, string) (*query.MessageDetail, error) { return nil, nil }
 func (e *stubEngine) SearchFastCount(context.Context, *search.Query, query.MessageFilter) (int64, error) { return 0, nil }
+func (e *stubEngine) GetAttachment(context.Context, int64) (*query.AttachmentInfo, error) { return nil, nil }
 func (e *stubEngine) GetGmailIDsByFilter(context.Context, query.MessageFilter) ([]string, error) { return nil, nil }
 func (e *stubEngine) ListAccounts(context.Context) ([]query.AccountInfo, error) { return nil, nil }
 func (e *stubEngine) GetTotalStats(context.Context, query.StatsOptions) (*query.TotalStats, error) { return nil, nil }

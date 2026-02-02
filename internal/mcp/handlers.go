@@ -2,9 +2,12 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -15,7 +18,8 @@ import (
 const maxLimit = 1000
 
 type handlers struct {
-	engine query.Engine
+	engine         query.Engine
+	attachmentsDir string
 }
 
 func (h *handlers) searchMessages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -65,6 +69,56 @@ func (h *handlers) getMessage(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}
 
 	return jsonResult(msg)
+}
+
+const maxAttachmentSize = 50 * 1024 * 1024 // 50MB
+
+func (h *handlers) getAttachment(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+
+	idFloat, ok := args["attachment_id"].(float64)
+	if !ok {
+		return mcp.NewToolResultError("attachment_id parameter is required"), nil
+	}
+	if idFloat != math.Trunc(idFloat) || idFloat < 1 || idFloat > math.MaxInt64 {
+		return mcp.NewToolResultError("attachment_id must be a positive integer"), nil
+	}
+
+	att, err := h.engine.GetAttachment(ctx, int64(idFloat))
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("get attachment failed: %v", err)), nil
+	}
+	if att == nil {
+		return mcp.NewToolResultError("attachment not found"), nil
+	}
+
+	if att.ContentHash == "" || len(att.ContentHash) < 2 {
+		return mcp.NewToolResultError("attachment has no stored content"), nil
+	}
+
+	filePath := filepath.Join(h.attachmentsDir, att.ContentHash[:2], att.ContentHash)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("attachment file not available: %v", err)), nil
+	}
+
+	if len(data) > maxAttachmentSize {
+		return mcp.NewToolResultError(fmt.Sprintf("attachment too large: %d bytes (max %d)", len(data), maxAttachmentSize)), nil
+	}
+
+	resp := struct {
+		Filename      string `json:"filename"`
+		MimeType      string `json:"mime_type"`
+		Size          int64  `json:"size"`
+		ContentBase64 string `json:"content_base64"`
+	}{
+		Filename:      att.Filename,
+		MimeType:      att.MimeType,
+		Size:          att.Size,
+		ContentBase64: base64.StdEncoding.EncodeToString(data),
+	}
+
+	return jsonResult(resp)
 }
 
 func (h *handlers) listMessages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

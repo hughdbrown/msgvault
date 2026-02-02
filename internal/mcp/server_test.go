@@ -2,9 +2,12 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,6 +22,7 @@ type stubEngine struct {
 	searchResults     []query.MessageSummary
 	listResults       []query.MessageSummary
 	messages          map[int64]*query.MessageDetail
+	attachments       map[int64]*query.AttachmentInfo
 	stats             *query.TotalStats
 	accounts          []query.AccountInfo
 	aggregateRows     []query.AggregateRow
@@ -35,6 +39,14 @@ func (e *stubEngine) GetMessage(_ context.Context, id int64) (*query.MessageDeta
 		return m, nil
 	}
 	return nil, fmt.Errorf("not found")
+}
+func (e *stubEngine) GetAttachment(_ context.Context, id int64) (*query.AttachmentInfo, error) {
+	if e.attachments != nil {
+		if a, ok := e.attachments[id]; ok {
+			return a, nil
+		}
+	}
+	return nil, nil
 }
 func (e *stubEngine) ListMessages(_ context.Context, _ query.MessageFilter) ([]query.MessageSummary, error) {
 	return e.listResults, nil
@@ -91,6 +103,8 @@ func callTool(t *testing.T, h *handlers, name string, args map[string]any) *mcp.
 		handler = h.searchMessages
 	case "get_message":
 		handler = h.getMessage
+	case "get_attachment":
+		handler = h.getAttachment
 	case "list_messages":
 		handler = h.listMessages
 	case "get_stats":
@@ -362,6 +376,94 @@ func TestAggregateInvalidDates(t *testing.T) {
 		r := callTool(t, h, "aggregate", map[string]any{"group_by": "sender", "before": "bad"})
 		if !r.IsError {
 			t.Fatal("expected error for invalid before date")
+		}
+	})
+}
+
+func TestGetAttachment(t *testing.T) {
+	// Create temp dir with a test attachment file
+	tmpDir := t.TempDir()
+	hash := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	hashDir := filepath.Join(tmpDir, hash[:2])
+	os.MkdirAll(hashDir, 0o755)
+	content := []byte("hello world PDF content")
+	os.WriteFile(filepath.Join(hashDir, hash), content, 0o644)
+
+	eng := &stubEngine{
+		attachments: map[int64]*query.AttachmentInfo{
+			10: {ID: 10, Filename: "report.pdf", MimeType: "application/pdf", Size: int64(len(content)), ContentHash: hash},
+			11: {ID: 11, Filename: "no-hash.pdf", MimeType: "application/pdf", Size: 100, ContentHash: ""},
+		},
+	}
+	h := &handlers{engine: eng, attachmentsDir: tmpDir}
+
+	t.Run("valid", func(t *testing.T) {
+		r := callTool(t, h, "get_attachment", map[string]any{"attachment_id": float64(10)})
+		if r.IsError {
+			t.Fatalf("unexpected error: %s", resultText(t, r))
+		}
+		var resp struct {
+			Filename      string `json:"filename"`
+			MimeType      string `json:"mime_type"`
+			Size          int64  `json:"size"`
+			ContentBase64 string `json:"content_base64"`
+		}
+		if err := json.Unmarshal([]byte(resultText(t, r)), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Filename != "report.pdf" {
+			t.Fatalf("unexpected filename: %s", resp.Filename)
+		}
+		if resp.MimeType != "application/pdf" {
+			t.Fatalf("unexpected mime_type: %s", resp.MimeType)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(resp.ContentBase64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(decoded) != string(content) {
+			t.Fatalf("content mismatch: got %q", string(decoded))
+		}
+	})
+
+	t.Run("missing attachment_id", func(t *testing.T) {
+		r := callTool(t, h, "get_attachment", map[string]any{})
+		if !r.IsError {
+			t.Fatal("expected error for missing attachment_id")
+		}
+	})
+
+	t.Run("non-integer id", func(t *testing.T) {
+		r := callTool(t, h, "get_attachment", map[string]any{"attachment_id": float64(1.5)})
+		if !r.IsError {
+			t.Fatal("expected error for non-integer id")
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		r := callTool(t, h, "get_attachment", map[string]any{"attachment_id": float64(999)})
+		if !r.IsError {
+			t.Fatal("expected error for not-found attachment")
+		}
+	})
+
+	t.Run("missing hash", func(t *testing.T) {
+		r := callTool(t, h, "get_attachment", map[string]any{"attachment_id": float64(11)})
+		if !r.IsError {
+			t.Fatal("expected error for attachment with no content hash")
+		}
+	})
+
+	t.Run("file not on disk", func(t *testing.T) {
+		eng2 := &stubEngine{
+			attachments: map[int64]*query.AttachmentInfo{
+				20: {ID: 20, Filename: "gone.pdf", MimeType: "application/pdf", Size: 100, ContentHash: "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"},
+			},
+		}
+		h2 := &handlers{engine: eng2, attachmentsDir: tmpDir}
+		r := callTool(t, h2, "get_attachment", map[string]any{"attachment_id": float64(20)})
+		if !r.IsError {
+			t.Fatal("expected error for missing file on disk")
 		}
 	})
 }
