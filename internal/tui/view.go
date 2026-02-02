@@ -11,18 +11,18 @@ import (
 	"github.com/wesm/msgvault/internal/search"
 )
 
-// Monochrome theme - works on any dark terminal
+// Monochrome theme - adaptive for light and dark terminals
 var (
-	// Background colors for dark terminals
-	bgBase   = lipgloss.Color("#000000") // Pure black base
-	bgAlt    = lipgloss.Color("#181818") // Gray for alternating rows
-	bgCursor = lipgloss.Color("#282828") // Lighter for cursor
+	// Background colors - adaptive for light/dark terminals
+	bgBase   = lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#000000"}
+	bgAlt    = lipgloss.AdaptiveColor{Light: "#f0f0f0", Dark: "#181818"}
+	bgCursor = lipgloss.AdaptiveColor{Light: "#e0e0e0", Dark: "#282828"}
 
 	// Title bar style - bold with visible background
 	titleBarStyle = lipgloss.NewStyle().
 			Bold(true).
-			Background(lipgloss.Color("#333333")).
-			Foreground(lipgloss.Color("#ffffff")).
+			Background(lipgloss.AdaptiveColor{Light: "#e0e0e0", Dark: "#333333"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "#000000", Dark: "#ffffff"}).
 			Padding(0, 1)
 
 	headerStyle = lipgloss.NewStyle().
@@ -92,7 +92,7 @@ var (
 
 	flashStyle = lipgloss.NewStyle().
 			Italic(true).
-			Foreground(lipgloss.Color("#ffcc00")). // Yellow/amber for visibility
+			Foreground(lipgloss.AdaptiveColor{Light: "#996600", Dark: "#ffcc00"}). // Amber for visibility
 			Background(bgBase)
 
 	highlightStyle = lipgloss.NewStyle().
