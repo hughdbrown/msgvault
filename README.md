@@ -8,22 +8,25 @@
 
 > **Pre-alpha software.** APIs, storage format, and CLI flags may change without notice. Back up your data.
 
-An offline Gmail archive tool that exports and stores your email data locally with full-text search. Sync commands are read-only. Deletion is a separate, explicit workflow that requires user confirmation — see the [documentation](https://msgvault.io) for details. The app requests `gmail.modify` scope to support deletion staging.
+Archive a lifetime of email and chat. Analytics and search in milliseconds. Query with AI, entirely offline.
 
 ## Why msgvault?
 
-Gmail holds decades of correspondence, but there's no easy way to keep a searchable local copy. msgvault downloads your messages via the Gmail API, stores them in a compact SQLite + Parquet stack, and gives you a fast terminal UI for exploring the archive. Multi-account support means personal and work inboxes live in one place.
+Your messages are yours. Decades of correspondence, attachments, and history shouldn't be locked behind a web interface or an API. msgvault downloads a complete local copy and then everything runs offline. Search, analytics, and AI chat all work against local data with no network access required.
+
+Currently supports Gmail, with WhatsApp and other messaging platforms planned.
 
 ## Features
 
-- **Full Gmail backup** — raw MIME, attachments, labels, and metadata
-- **Interactive TUI** — drill-down analytics powered by DuckDB over Parquet
-- **Full-text search** — FTS5 with Gmail-like query syntax (`from:`, `has:attachment`, date ranges)
-- **Incremental sync** — History API picks up only new and changed messages
-- **Multi-account** — archive several Gmail accounts in a single database
-- **Resumable** — interrupted syncs resume from the last checkpoint
-- **Content-addressed attachments** — deduplicated by SHA-256
-- **MCP server** — expose your archive to AI assistants
+- **Full Gmail backup**: raw MIME, attachments, labels, and metadata
+- **Interactive TUI**: drill-down analytics over your entire message history, powered by DuckDB over Parquet
+- **Full-text search**: FTS5 with Gmail-like query syntax (`from:`, `has:attachment`, date ranges)
+- **MCP server**: access your full archive at the speed of thought in Claude Desktop and other MCP-capable AI agents
+- **DuckDB analytics**: millisecond aggregate queries across hundreds of thousands of messages in the TUI, CLI, and MCP server
+- **Incremental sync**: History API picks up only new and changed messages
+- **Multi-account**: archive several Gmail accounts in a single database
+- **Resumable**: interrupted syncs resume from the last checkpoint
+- **Content-addressed attachments**: deduplicated by SHA-256
 
 ## Installation
 
@@ -83,20 +86,20 @@ See the [Configuration Guide](https://msgvault.io/configuration/) for all option
 
 ## MCP Server
 
-msgvault includes an MCP server that exposes your archive to AI assistants. See the [MCP documentation](https://msgvault.io/usage/mcp/) for setup instructions.
+msgvault includes an MCP server that lets AI assistants search, analyze, and read your archived messages. Connect it to Claude Desktop or any MCP-capable agent and query your full message history conversationally. See the [MCP documentation](https://msgvault.io/usage/mcp/) for setup instructions.
 
 ## Documentation
 
-- [Setup Guide](https://msgvault.io/guides/oauth-setup/) — OAuth, first sync, headless servers
-- [Searching](https://msgvault.io/usage/searching/) — query syntax and operators
-- [Interactive TUI](https://msgvault.io/usage/tui/) — keybindings, views, deletion staging
-- [CLI Reference](https://msgvault.io/usage/cli/) — all commands and flags
-- [Multi-Account](https://msgvault.io/usage/multi-account/) — managing multiple Gmail accounts
-- [Configuration](https://msgvault.io/configuration/) — config file and environment variables
-- [Architecture](https://msgvault.io/architecture/storage/) — SQLite, Parquet, and attachment storage
-- [MCP Server](https://msgvault.io/usage/mcp/) — AI assistant integration
-- [Troubleshooting](https://msgvault.io/troubleshooting/) — common issues and fixes
-- [Development](https://msgvault.io/development/) — contributing, testing, building
+- [Setup Guide](https://msgvault.io/guides/oauth-setup/): OAuth, first sync, headless servers
+- [Searching](https://msgvault.io/usage/searching/): query syntax and operators
+- [Interactive TUI](https://msgvault.io/usage/tui/): keybindings, views, deletion staging
+- [CLI Reference](https://msgvault.io/usage/cli/): all commands and flags
+- [Multi-Account](https://msgvault.io/usage/multi-account/): managing multiple Gmail accounts
+- [Configuration](https://msgvault.io/configuration/): config file and environment variables
+- [Architecture](https://msgvault.io/architecture/storage/): SQLite, Parquet, and attachment storage
+- [MCP Server](https://msgvault.io/usage/mcp/): AI assistant integration
+- [Troubleshooting](https://msgvault.io/troubleshooting/): common issues and fixes
+- [Development](https://msgvault.io/development/): contributing, testing, building
 
 ## Development
 
@@ -110,4 +113,4 @@ make install        # build and install
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT. See [LICENSE](LICENSE) for details.
