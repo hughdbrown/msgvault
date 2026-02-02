@@ -908,12 +908,13 @@ func (m Model) threadView() string {
 
 	var sb strings.Builder
 
-	// Calculate column widths (reserve 3 for selection indicator)
+	// Calculate column widths (reserve 3 for selection indicator + 6 for spacing)
 	dateWidth := 16
 	sizeWidth := 8
-	fromSubjectWidth := m.width - dateWidth - sizeWidth - 9
-	if fromSubjectWidth < 20 {
-		fromSubjectWidth = 20
+	available := m.width - dateWidth - sizeWidth - 9
+	fromSubjectWidth := available
+	if fromSubjectWidth < 10 {
+		fromSubjectWidth = 10
 	}
 
 	// Header row
@@ -946,12 +947,14 @@ func (m Model) threadView() string {
 		msg := m.threadMessages[i]
 		isCursor := i == m.threadCursor
 
-		// Selection indicator
+		// Selection indicator (styled to match row background)
 		var selIndicator string
 		if isCursor {
 			selIndicator = cursorRowStyle.Render("▶  ")
+		} else if i%2 == 0 {
+			selIndicator = normalRowStyle.Render("   ")
 		} else {
-			selIndicator = "   "
+			selIndicator = altRowStyle.Render("   ")
 		}
 
 		// Format date
