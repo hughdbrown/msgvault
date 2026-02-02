@@ -3396,25 +3396,46 @@ func TestDrillFilterPreservedAfterMessageDetail(t *testing.T) {
 
 // TestHeaderShowsTitleBar verifies the title bar shows msgvault with version.
 func TestHeaderShowsTitleBar(t *testing.T) {
-	model := NewBuilder().WithSize(100, 20).WithViewType(query.ViewSenders).Build()
-	model.version = "abc1234567890"
-
-	header := model.headerView()
-	lines := strings.Split(header, "\n")
-
-	if len(lines) < 2 {
-		t.Fatalf("expected 2 header lines, got %d", len(lines))
+	tests := []struct {
+		name        string
+		version     string
+		wantVersion bool   // should version appear in title
+		wantText    string // expected version text in brackets
+	}{
+		{"tagged version", "v0.1.0", true, "[v0.1.0]"},
+		{"dev version hidden", "dev", false, ""},
+		{"empty version hidden", "", false, ""},
+		{"prerelease version", "v1.0.0-rc1", true, "[v1.0.0-rc1]"},
 	}
 
-	// Line 1 should contain msgvault and truncated version
-	if !strings.Contains(lines[0], "msgvault") {
-		t.Errorf("expected title bar to contain 'msgvault', got: %s", lines[0])
-	}
-	if !strings.Contains(lines[0], "[abc1234") {
-		t.Errorf("expected title bar to contain truncated version '[abc1234', got: %s", lines[0])
-	}
-	if !strings.Contains(lines[0], "All Accounts") {
-		t.Errorf("expected title bar to contain 'All Accounts', got: %s", lines[0])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := NewBuilder().WithSize(100, 20).WithViewType(query.ViewSenders).Build()
+			model.version = tt.version
+
+			header := model.headerView()
+			lines := strings.Split(header, "\n")
+
+			if len(lines) < 2 {
+				t.Fatalf("expected 2 header lines, got %d", len(lines))
+			}
+
+			if !strings.Contains(lines[0], "msgvault") {
+				t.Errorf("expected title bar to contain 'msgvault', got: %s", lines[0])
+			}
+			if tt.wantVersion {
+				if !strings.Contains(lines[0], tt.wantText) {
+					t.Errorf("expected title bar to contain %q, got: %s", tt.wantText, lines[0])
+				}
+			} else {
+				if strings.Contains(lines[0], "[") {
+					t.Errorf("expected no version in title bar, got: %s", lines[0])
+				}
+			}
+			if !strings.Contains(lines[0], "All Accounts") {
+				t.Errorf("expected title bar to contain 'All Accounts', got: %s", lines[0])
+			}
+		})
 	}
 }
 

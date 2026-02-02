@@ -257,13 +257,8 @@ func (m Model) headerView() string {
 	// === LINE 1: Title bar ===
 	// Build title with version
 	titleText := "msgvault"
-	if m.version != "" && m.version != "unknown" {
-		// Show short version (first 7 chars of commit hash)
-		ver := m.version
-		if len(ver) > 7 {
-			ver = ver[:7]
-		}
-		titleText = fmt.Sprintf("msgvault [%s]", ver)
+	if m.version != "" && m.version != "dev" {
+		titleText = fmt.Sprintf("msgvault [%s]", m.version)
 	}
 
 	// Account indicator
