@@ -15,23 +15,37 @@ jobs:
         include:
           - goarch: amd64
             runner: ubuntu-latest
+            go_arch_name: amd64
           - goarch: arm64
             runner: ubuntu-24.04-arm
+            go_arch_name: arm64
     runs-on: ${{ matrix.runner }}
+    container:
+      image: rockylinux:8
 
     steps:
+      - name: Install build tools
+        run: |
+          dnf install -y gcc gcc-c++ make git tar gzip file
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
+      - name: Install Go
+        run: |
+          GO_VERSION=$(grep '^go ' go.mod | awk '{print $2}')
+          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${{ matrix.go_arch_name }}.tar.gz" -o go.tar.gz
+          tar -C /usr/local -xzf go.tar.gz
+          rm go.tar.gz
+          echo "/usr/local/go/bin" >> $GITHUB_PATH
+          echo "$HOME/go/bin" >> $GITHUB_PATH
 
       - name: Build
         env:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 1
+          CGO_ENABLED: '1'
         run: |
+          export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
           VERSION=${GITHUB_REF#refs/tags/v}
 
           mkdir -p dist
@@ -42,7 +56,11 @@ jobs:
           file dist/msgvault
           ldd dist/msgvault || true
 
-          # Smoke test — both architectures build natively now
+          # Verify glibc version requirement is reasonable
+          echo "--- GLIBC requirement ---"
+          objdump -T dist/msgvault 2>/dev/null | grep -oP 'GLIBC_\d+\.\d+' | sort -uV | tail -1 || true
+
+          # Smoke test
           echo "--- Smoke test ---"
           SMOKE_OUT=$(dist/msgvault version 2>&1)
           echo "$SMOKE_OUT"
