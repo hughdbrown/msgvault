@@ -166,6 +166,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Set up MinGW
+        id: msys2
         uses: msys2/setup-msys2@d40200dc2f5f4942b8ceff329b5499042d157699 # v2
         with:
           msystem: MINGW64
@@ -177,7 +178,7 @@ jobs:
           GOOS: windows
           GOARCH: amd64
           CGO_ENABLED: '1'
-          CC: D:\a\_temp\msys64\mingw64\bin\gcc.exe
+          CC: ${{ steps.msys2.outputs.msys2-location }}\mingw64\bin\gcc.exe
         run: |
           $VERSION = "${{ github.ref_name }}".TrimStart("v")
 
