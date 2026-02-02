@@ -47,13 +47,12 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '1'
-          CGO_LDFLAGS: '-lstdc++ -lm'
         run: |
           export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
           VERSION=${GITHUB_REF#refs/tags/v}
 
           mkdir -p dist
-          LDFLAGS="-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION}"
+          LDFLAGS="-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION} -extldflags '-lstdc++ -lm'"
           go build -tags fts5 -trimpath -buildvcs=false -ldflags="$LDFLAGS" -o dist/msgvault ./cmd/msgvault
 
           echo "--- Binary info ---"
