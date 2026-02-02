@@ -50,7 +50,7 @@ jobs:
 
           mkdir -p dist
           LDFLAGS="-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION}"
-          go build -tags fts5 -trimpath -ldflags="$LDFLAGS" -o dist/msgvault ./cmd/msgvault
+          go build -tags fts5 -trimpath -buildvcs=false -ldflags="$LDFLAGS" -o dist/msgvault ./cmd/msgvault
 
           echo "--- Binary info ---"
           file dist/msgvault
@@ -81,9 +81,9 @@ jobs:
       matrix:
         include:
           - goarch: amd64
-            runner: macos-13
+            runner: macos-15
           - goarch: arm64
-            runner: macos-14
+            runner: macos-15
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -105,6 +105,9 @@ jobs:
           LDFLAGS="-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION}"
           go build -tags fts5 -trimpath -ldflags="$LDFLAGS" -o dist/msgvault ./cmd/msgvault
 
+          echo "--- Binary info ---"
+          file dist/msgvault
+
           # Verify no libstdc++ dependency (macOS should only link libc++ and system libs)
           echo "--- Dynamic libraries ---"
           otool -L dist/msgvault
@@ -113,11 +116,16 @@ jobs:
             exit 1
           fi
 
-          # Smoke test — verify binary runs and reports correct version
-          echo "--- Smoke test ---"
-          SMOKE_OUT=$(dist/msgvault version 2>&1)
-          echo "$SMOKE_OUT"
-          echo "$SMOKE_OUT" | grep -q "v${VERSION}" || { echo "FATAL: version output doesn't match tag"; exit 1; }
+          # Smoke test — only for native arch (amd64 is cross-compiled from arm64)
+          NATIVE_ARCH=$(uname -m)
+          if [ "${{ matrix.goarch }}" = "arm64" ] && [ "$NATIVE_ARCH" = "arm64" ]; then
+            echo "--- Smoke test ---"
+            SMOKE_OUT=$(dist/msgvault version 2>&1)
+            echo "$SMOKE_OUT"
+            echo "$SMOKE_OUT" | grep -q "v${VERSION}" || { echo "FATAL: version output doesn't match tag"; exit 1; }
+          else
+            echo "--- Smoke test skipped (cross-compiled) ---"
+          fi
 
           cd dist
           ARCHIVE="msgvault_${VERSION}_darwin_${{ matrix.goarch }}.tar.gz"
