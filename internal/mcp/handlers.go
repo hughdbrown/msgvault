@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -92,18 +93,33 @@ func (h *handlers) getAttachment(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError("attachment not found"), nil
 	}
 
+	if h.attachmentsDir == "" {
+		return mcp.NewToolResultError("attachments directory not configured"), nil
+	}
+
 	if att.ContentHash == "" || len(att.ContentHash) < 2 {
 		return mcp.NewToolResultError("attachment has no stored content"), nil
 	}
 
+	// Validate content_hash is strictly hex to prevent path traversal.
+	if _, err := hex.DecodeString(att.ContentHash); err != nil {
+		return mcp.NewToolResultError("attachment has invalid content hash"), nil
+	}
+
 	filePath := filepath.Join(h.attachmentsDir, att.ContentHash[:2], att.ContentHash)
-	data, err := os.ReadFile(filePath)
+
+	// Check size before reading to avoid loading oversized files into memory.
+	info, err := os.Stat(filePath)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("attachment file not available: %v", err)), nil
 	}
+	if info.Size() > maxAttachmentSize {
+		return mcp.NewToolResultError(fmt.Sprintf("attachment too large: %d bytes (max %d)", info.Size(), maxAttachmentSize)), nil
+	}
 
-	if len(data) > maxAttachmentSize {
-		return mcp.NewToolResultError(fmt.Sprintf("attachment too large: %d bytes (max %d)", len(data), maxAttachmentSize)), nil
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("attachment file not available: %v", err)), nil
 	}
 
 	resp := struct {
