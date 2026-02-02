@@ -31,7 +31,7 @@ var (
 			Padding(0, 1)
 
 	statsStyle = lipgloss.NewStyle().
-			Faint(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#555555", Dark: "#999999"}).
 			Background(bgBase).
 			Padding(0, 1)
 
@@ -67,7 +67,7 @@ var (
 			Background(bgAlt)
 
 	footerStyle = lipgloss.NewStyle().
-			Faint(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "#555555", Dark: "#999999"}).
 			Background(bgBase).
 			Padding(0, 1)
 
