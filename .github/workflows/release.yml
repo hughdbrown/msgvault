@@ -167,7 +167,7 @@ jobs:
           $VERSION = "${{ github.ref_name }}".TrimStart("v")
 
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $LDFLAGS = "-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION}"
+          $LDFLAGS = "-s -w -X github.com/wesm/msgvault/cmd/msgvault/cmd.Version=v${VERSION} -extldflags '-Wl,--no-keep-memory'"
           go build -tags fts5 -trimpath -ldflags="$LDFLAGS" -o dist/msgvault.exe ./cmd/msgvault
           if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
