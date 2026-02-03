@@ -193,6 +193,7 @@ var (
 	deleteTrash   bool // Use trash instead of permanent delete
 	deleteYes     bool
 	deleteDryRun  bool
+	deleteList    bool
 	deleteAccount string
 )
 
@@ -207,6 +208,7 @@ Use --trash to move messages to Gmail trash instead (recoverable for 30 days, sl
 Examples:
   msgvault delete-staged                # Permanent delete all pending (fast)
   msgvault delete-staged batch-123      # Delete specific batch
+  msgvault delete-staged --list         # Show staged batches without executing
   msgvault delete-staged --trash        # Move to trash instead (slower)
   msgvault delete-staged --yes          # Skip confirmation`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -241,7 +243,27 @@ Examples:
 		}
 
 		if len(manifests) == 0 {
-			fmt.Println("No pending deletions to execute.")
+			fmt.Println("No staged deletions.")
+			return nil
+		}
+
+		// --list: show staged batches (pending + in-progress) and exit
+		if deleteList {
+			fmt.Printf("Staged deletions: %d batch(es)\n\n", len(manifests))
+			fmt.Printf("  %-25s  %-12s  %10s  %s\n", "ID", "Status", "Messages", "Description")
+			fmt.Printf("  %-25s  %-12s  %10s  %s\n", "---", "------", "--------", "-----------")
+			totalMessages := 0
+			for _, m := range manifests {
+				fmt.Printf("  %-25s  %-12s  %10d  %s\n",
+					truncate(m.ID, 25),
+					m.Status,
+					len(m.GmailIDs),
+					truncate(m.Description, 40),
+				)
+				totalMessages += len(m.GmailIDs)
+			}
+			fmt.Printf("\nTotal: %d messages across %d batch(es)\n", totalMessages, len(manifests))
+			fmt.Println("\nUse 'msgvault delete-staged' to execute, or 'msgvault show-deletion <id>' for details.")
 			return nil
 		}
 
@@ -651,6 +673,7 @@ func init() {
 	deleteStagedCmd.Flags().BoolVar(&deleteTrash, "trash", false, "Move to trash instead of permanent delete (slower)")
 	deleteStagedCmd.Flags().BoolVarP(&deleteYes, "yes", "y", false, "Skip confirmation")
 	deleteStagedCmd.Flags().BoolVar(&deleteDryRun, "dry-run", false, "Show what would be deleted")
+	deleteStagedCmd.Flags().BoolVarP(&deleteList, "list", "l", false, "List staged batches without executing")
 	deleteStagedCmd.Flags().StringVar(&deleteAccount, "account", "", "Gmail account to use")
 
 	rootCmd.AddCommand(listDeletionsCmd)
