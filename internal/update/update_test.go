@@ -3,6 +3,7 @@ package update
 import (
 	"archive/tar"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -229,9 +230,9 @@ func TestIsDevBuildVersion(t *testing.T) {
 func TestIsNewer(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		v1, v2     string
-		want       bool
+		name   string
+		v1, v2 string
+		want   bool
 	}{
 		{"major version bump", "1.0.0", "0.9.0", true},
 		{"minor version bump", "1.1.0", "1.0.0", true},
@@ -364,5 +365,33 @@ func TestFormatSize(t *testing.T) {
 				t.Errorf("FormatSize(%d) = %q, want %q", tt.bytes, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSaveCacheFilePermissions verifies that the update check cache file is
+// saved with restrictive permissions (0600) to protect user data.
+func TestSaveCacheFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file permissions not enforced on Windows")
+	}
+
+	// Use a temp directory as MSGVAULT_HOME to avoid touching real user data
+	tmpDir := t.TempDir()
+	t.Setenv("MSGVAULT_HOME", tmpDir)
+
+	// Call saveCache which writes to getCacheDir()/update_check.json
+	saveCache("1.0.0")
+
+	cachePath := filepath.Join(tmpDir, cacheFileName)
+	info, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatalf("Stat(%s) error = %v", cachePath, err)
+	}
+
+	// File should have 0600 permissions (owner read/write only)
+	got := info.Mode().Perm()
+	want := os.FileMode(0600)
+	if got != want {
+		t.Errorf("cache file permissions = %04o, want %04o", got, want)
 	}
 }

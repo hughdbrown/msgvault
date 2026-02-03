@@ -19,6 +19,12 @@ func testManager(t *testing.T) *Manager {
 	return mgr
 }
 
+// newTestManifest creates a Manifest directly with the given description and IDs.
+func newTestManifest(t *testing.T, desc string, ids ...string) *Manifest {
+	t.Helper()
+	return NewManifest(desc, ids)
+}
+
 // createTestManifest creates a manifest via the manager with default IDs.
 func createTestManifest(t *testing.T, mgr *Manager, desc string) *Manifest {
 	t.Helper()
@@ -702,4 +708,28 @@ func TestManager_ListManifests_NonexistentDir(t *testing.T) {
 
 	// ListPending should return empty (not error) for nonexistent dir
 	assertListCount(t, mgr.ListPending, 0)
+}
+
+// TestManifest_Save_FilePermissions verifies that manifest files are saved with
+// restrictive permissions (0600) to protect Gmail message IDs.
+func TestManifest_Save_FilePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "permission-test.json")
+
+	m := newTestManifest(t, "permission test", "msg1", "msg2")
+	if err := m.Save(path); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+
+	// File should have 0600 permissions (owner read/write only)
+	got := info.Mode().Perm()
+	want := os.FileMode(0600)
+	if got != want {
+		t.Errorf("file permissions = %04o, want %04o", got, want)
+	}
 }
