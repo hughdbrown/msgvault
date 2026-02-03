@@ -2,8 +2,8 @@ package tui
 
 import (
 	"context"
+	"os"
 	"path/filepath"
-	"sort"
 	"testing"
 
 	"github.com/wesm/msgvault/internal/deletion"
@@ -14,6 +14,7 @@ import (
 
 // ControllerTestEnv encapsulates common setup for ActionController tests.
 type ControllerTestEnv struct {
+	t    *testing.T
 	Ctrl *ActionController
 	Dir  string
 	Mgr  *deletion.Manager
@@ -29,37 +30,49 @@ func NewControllerTestEnv(t *testing.T, engine *querytest.MockEngine) *Controlle
 		t.Fatalf("NewManager: %v", err)
 	}
 	return &ControllerTestEnv{
+		t:    t,
 		Ctrl: NewActionController(engine, dir, mgr),
 		Dir:  dir,
 		Mgr:  mgr,
 	}
 }
 
-func newTestController(t *testing.T, gmailIDs ...string) *ActionController {
+func newTestEnv(t *testing.T, gmailIDs ...string) *ControllerTestEnv {
 	t.Helper()
-	env := NewControllerTestEnv(t, &querytest.MockEngine{GmailIDs: gmailIDs})
-	return env.Ctrl
+	return NewControllerTestEnv(t, &querytest.MockEngine{GmailIDs: gmailIDs})
 }
 
 type stageArgs struct {
-	aggregates  map[string]bool
-	selection   map[int64]bool
-	view        query.ViewType
-	accountID   *int64
-	accounts    []query.AccountInfo
-	messages    []query.MessageSummary
-	drillFilter *query.MessageFilter
+	aggregates      map[string]bool
+	selection       map[int64]bool
+	view            query.ViewType
+	accountID       *int64
+	accounts        []query.AccountInfo
+	timeGranularity query.TimeGranularity
+	messages        []query.MessageSummary
+	drillFilter     *query.MessageFilter
 }
 
-func stageForDeletion(t *testing.T, ctrl *ActionController, args stageArgs) *deletion.Manifest {
-	t.Helper()
-	view := args.view
-	manifest, err := ctrl.StageForDeletion(
-		args.aggregates, args.selection, view, args.accountID, args.accounts,
-		view, "", query.TimeYear, args.messages, args.drillFilter,
-	)
+// StageForDeletion is a test helper that calls the controller's StageForDeletion
+// method with sensible defaults, failing the test on error.
+func (e *ControllerTestEnv) StageForDeletion(args stageArgs) *deletion.Manifest {
+	e.t.Helper()
+	granularity := args.timeGranularity
+	if granularity == 0 {
+		granularity = query.TimeYear
+	}
+	manifest, err := e.Ctrl.StageForDeletion(DeletionContext{
+		AggregateSelection: args.aggregates,
+		MessageSelection:   args.selection,
+		AggregateViewType:  args.view,
+		AccountFilter:      args.accountID,
+		Accounts:           args.accounts,
+		TimeGranularity:    granularity,
+		Messages:           args.messages,
+		DrillFilter:        args.drillFilter,
+	})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		e.t.Fatalf("unexpected error: %v", err)
 	}
 	return manifest
 }
@@ -69,10 +82,10 @@ func msgSummary(id int64, sourceID string) query.MessageSummary {
 }
 
 func TestStageForDeletion_FromAggregateSelection(t *testing.T) {
-	ctrl := newTestController(t, "gid1", "gid2", "gid3")
+	env := newTestEnv(t, "gid1", "gid2", "gid3")
 
-	manifest := stageForDeletion(t, ctrl, stageArgs{
-		aggregates: testutil.StringSet("alice@example.com"),
+	manifest := env.StageForDeletion(stageArgs{
+		aggregates: testutil.MakeSet("alice@example.com"),
 		view:       query.ViewSenders,
 	})
 
@@ -86,7 +99,7 @@ func TestStageForDeletion_FromAggregateSelection(t *testing.T) {
 }
 
 func TestStageForDeletion_FromMessageSelection(t *testing.T) {
-	ctrl := newTestController(t)
+	env := newTestEnv(t)
 
 	messages := []query.MessageSummary{
 		msgSummary(10, "gid_a"),
@@ -94,40 +107,34 @@ func TestStageForDeletion_FromMessageSelection(t *testing.T) {
 		msgSummary(30, "gid_c"),
 	}
 
-	manifest := stageForDeletion(t, ctrl, stageArgs{
-		selection: testutil.IDSet(10, 30),
+	manifest := env.StageForDeletion(stageArgs{
+		selection: testutil.MakeSet[int64](10, 30),
 		view:      query.ViewSenders,
 		messages:  messages,
 	})
 
-	ids := make([]string, len(manifest.GmailIDs))
-	copy(ids, manifest.GmailIDs)
-	sort.Strings(ids)
-
-	if len(ids) != 2 || ids[0] != "gid_a" || ids[1] != "gid_c" {
-		t.Errorf("expected [gid_a gid_c], got %v", ids)
-	}
+	testutil.AssertStringSet(t, manifest.GmailIDs, "gid_a", "gid_c")
 }
 
 func TestStageForDeletion_NoSelection(t *testing.T) {
-	ctrl := newTestController(t)
+	env := newTestEnv(t)
 
-	_, err := ctrl.StageForDeletion(
-		nil, nil, query.ViewSenders, nil, nil,
-		query.ViewSenders, "", query.TimeYear, nil, nil,
-	)
+	_, err := env.Ctrl.StageForDeletion(DeletionContext{
+		AggregateViewType: query.ViewSenders,
+		TimeGranularity:   query.TimeYear,
+	})
 	if err == nil {
 		t.Fatal("expected error for empty selection")
 	}
 }
 
 func TestStageForDeletion_MultipleAggregates_DeterministicFilter(t *testing.T) {
-	ctrl := newTestController(t, "gid1")
+	env := newTestEnv(t, "gid1")
 
-	agg := testutil.StringSet("charlie@example.com", "alice@example.com", "bob@example.com")
+	agg := testutil.MakeSet("charlie@example.com", "alice@example.com", "bob@example.com")
 
 	for i := 0; i < 10; i++ {
-		manifest := stageForDeletion(t, ctrl, stageArgs{aggregates: agg, view: query.ViewSenders})
+		manifest := env.StageForDeletion(stageArgs{aggregates: agg, view: query.ViewSenders})
 		testutil.AssertStrings(t, manifest.Filters.Senders, "alice@example.com", "bob@example.com", "charlie@example.com")
 	}
 }
@@ -155,10 +162,10 @@ func TestStageForDeletion_ViewTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctrl := newTestController(t, "gid1")
+			env := newTestEnv(t, "gid1")
 
-			manifest := stageForDeletion(t, ctrl, stageArgs{
-				aggregates: testutil.StringSet(tt.key),
+			manifest := env.StageForDeletion(stageArgs{
+				aggregates: testutil.MakeSet(tt.key),
 				view:       tt.viewType,
 			})
 			tt.check(t, manifest.Filters)
@@ -167,15 +174,15 @@ func TestStageForDeletion_ViewTypes(t *testing.T) {
 }
 
 func TestStageForDeletion_AccountFilter(t *testing.T) {
-	ctrl := newTestController(t, "gid1")
+	env := newTestEnv(t, "gid1")
 
 	accountID := int64(42)
 	accounts := []query.AccountInfo{
 		{ID: 42, Identifier: "test@gmail.com"},
 	}
 
-	manifest := stageForDeletion(t, ctrl, stageArgs{
-		aggregates: testutil.StringSet("sender@x.com"),
+	manifest := env.StageForDeletion(stageArgs{
+		aggregates: testutil.MakeSet("sender@x.com"),
 		view:       query.ViewSenders,
 		accountID:  &accountID,
 		accounts:   accounts,
@@ -201,8 +208,8 @@ func TestStageForDeletion_DrillFilterApplied(t *testing.T) {
 		Sender: "alice@example.com",
 	}
 
-	manifest := stageForDeletion(t, env.Ctrl, stageArgs{
-		aggregates:  testutil.StringSet("2024-01"),
+	manifest := env.StageForDeletion(stageArgs{
+		aggregates:  testutil.MakeSet("2024-01"),
 		view:        query.ViewTime,
 		drillFilter: drillFilter,
 	})
@@ -211,8 +218,8 @@ func TestStageForDeletion_DrillFilterApplied(t *testing.T) {
 	if capturedFilter.Sender != "alice@example.com" {
 		t.Errorf("expected drill filter sender 'alice@example.com', got %q", capturedFilter.Sender)
 	}
-	if capturedFilter.TimePeriod != "2024-01" {
-		t.Errorf("expected time period '2024-01', got %q", capturedFilter.TimePeriod)
+	if capturedFilter.TimeRange.Period != "2024-01" {
+		t.Errorf("expected time period '2024-01', got %q", capturedFilter.TimeRange.Period)
 	}
 	if len(manifest.GmailIDs) != 2 {
 		t.Errorf("expected 2 gmail IDs, got %d", len(manifest.GmailIDs))
@@ -230,36 +237,191 @@ func TestStageForDeletion_NoDrillFilter(t *testing.T) {
 	}
 	env := NewControllerTestEnv(t, engine)
 
-	stageForDeletion(t, env.Ctrl, stageArgs{
-		aggregates: testutil.StringSet("2024-01"),
+	env.StageForDeletion(stageArgs{
+		aggregates: testutil.MakeSet("2024-01"),
 		view:       query.ViewTime,
 	})
 
 	if capturedFilter.Sender != "" {
 		t.Errorf("expected no sender filter, got %q", capturedFilter.Sender)
 	}
-	if capturedFilter.TimePeriod != "2024-01" {
-		t.Errorf("expected time period '2024-01', got %q", capturedFilter.TimePeriod)
+	if capturedFilter.TimeRange.Period != "2024-01" {
+		t.Errorf("expected time period '2024-01', got %q", capturedFilter.TimeRange.Period)
 	}
 }
 
 func TestExportAttachments_NilDetail(t *testing.T) {
-	ctrl := newTestController(t)
-	cmd := ctrl.ExportAttachments(nil, nil)
+	env := newTestEnv(t)
+	cmd := env.Ctrl.ExportAttachments(nil, nil)
 	if cmd != nil {
 		t.Error("expected nil cmd for nil detail")
 	}
 }
 
 func TestExportAttachments_NoSelection(t *testing.T) {
-	ctrl := newTestController(t)
+	env := newTestEnv(t)
 	detail := &query.MessageDetail{
 		Attachments: []query.AttachmentInfo{
 			{ID: 1, Filename: "file.pdf", ContentHash: "abc123"},
 		},
 	}
-	cmd := ctrl.ExportAttachments(detail, map[int]bool{})
+	cmd := env.Ctrl.ExportAttachments(detail, map[int]bool{})
 	if cmd != nil {
 		t.Error("expected nil cmd for empty selection")
+	}
+}
+
+func TestExportAttachments_ErrBehavior(t *testing.T) {
+	tests := []struct {
+		name        string
+		attachments []query.AttachmentInfo
+		wantErr     bool
+	}{
+		{
+			name: "invalid content hash sets Err",
+			attachments: []query.AttachmentInfo{
+				{ID: 1, Filename: "file.pdf", ContentHash: ""},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing file sets Err",
+			attachments: []query.AttachmentInfo{
+				{ID: 1, Filename: "file.pdf", ContentHash: "abc123def456"},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			detail := &query.MessageDetail{
+				ID:          1,
+				Subject:     "Test",
+				Attachments: tt.attachments,
+			}
+			selection := make(map[int]bool)
+			for i := range tt.attachments {
+				selection[i] = true
+			}
+
+			cmd := env.Ctrl.ExportAttachments(detail, selection)
+			if cmd == nil {
+				t.Fatal("expected non-nil cmd")
+			}
+
+			msg := cmd()
+			result, ok := msg.(ExportResultMsg)
+			if !ok {
+				t.Fatalf("expected ExportResultMsg, got %T", msg)
+			}
+
+			if tt.wantErr && result.Err == nil {
+				t.Error("expected Err to be set")
+			}
+			if !tt.wantErr && result.Err != nil {
+				t.Errorf("expected Err to be nil, got %v", result.Err)
+			}
+		})
+	}
+}
+
+func TestExportAttachments_PartialSuccess(t *testing.T) {
+	// Partial success: one valid file exports, one missing file fails.
+	// Err should be nil because stats.Count > 0 (some files succeeded).
+	env := newTestEnv(t)
+
+	// Clean up the zip file that gets created in current directory.
+	// TODO: ExportAttachments should write to a configurable output directory.
+	t.Cleanup(func() { os.Remove("Test_1.zip") })
+
+	// Create a valid attachment file
+	validHash := "abc123def456ghi789"
+	attachmentsDir := filepath.Join(env.Dir, "attachments")
+	hashDir := filepath.Join(attachmentsDir, validHash[:2])
+	if err := os.MkdirAll(hashDir, 0o755); err != nil {
+		t.Fatalf("failed to create hash dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hashDir, validHash), []byte("test content"), 0o644); err != nil {
+		t.Fatalf("failed to write attachment: %v", err)
+	}
+
+	detail := &query.MessageDetail{
+		ID:      1,
+		Subject: "Test",
+		Attachments: []query.AttachmentInfo{
+			{ID: 1, Filename: "valid.pdf", ContentHash: validHash},
+			{ID: 2, Filename: "missing.pdf", ContentHash: "nonexistent12345"},
+		},
+	}
+	selection := map[int]bool{0: true, 1: true}
+
+	cmd := env.Ctrl.ExportAttachments(detail, selection)
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd")
+	}
+
+	msg := cmd()
+	result, ok := msg.(ExportResultMsg)
+	if !ok {
+		t.Fatalf("expected ExportResultMsg, got %T", msg)
+	}
+
+	// Partial success should NOT set Err
+	if result.Err != nil {
+		t.Errorf("expected Err to be nil for partial success, got %v", result.Err)
+	}
+
+	// Result should contain both success info and error details
+	if result.Result == "" {
+		t.Error("expected non-empty Result")
+	}
+}
+
+func TestExportAttachments_FullSuccess(t *testing.T) {
+	// Full success: all attachments export without errors.
+	env := newTestEnv(t)
+
+	// Clean up the zip file that gets created in current directory.
+	// TODO: ExportAttachments should write to a configurable output directory.
+	t.Cleanup(func() { os.Remove("Test_1.zip") })
+
+	// Create a valid attachment file
+	validHash := "abc123def456ghi789"
+	attachmentsDir := filepath.Join(env.Dir, "attachments")
+	hashDir := filepath.Join(attachmentsDir, validHash[:2])
+	if err := os.MkdirAll(hashDir, 0o755); err != nil {
+		t.Fatalf("failed to create hash dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hashDir, validHash), []byte("test content"), 0o644); err != nil {
+		t.Fatalf("failed to write attachment: %v", err)
+	}
+
+	detail := &query.MessageDetail{
+		ID:      1,
+		Subject: "Test",
+		Attachments: []query.AttachmentInfo{
+			{ID: 1, Filename: "valid.pdf", ContentHash: validHash},
+		},
+	}
+	selection := map[int]bool{0: true}
+
+	cmd := env.Ctrl.ExportAttachments(detail, selection)
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd")
+	}
+
+	msg := cmd()
+	result, ok := msg.(ExportResultMsg)
+	if !ok {
+		t.Fatalf("expected ExportResultMsg, got %T", msg)
+	}
+
+	if result.Err != nil {
+		t.Errorf("expected Err to be nil for full success, got %v", result.Err)
+	}
+	if result.Result == "" {
+		t.Error("expected non-empty Result")
 	}
 }

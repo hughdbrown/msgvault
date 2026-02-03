@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/wesm/msgvault/internal/config"
+	"golang.org/x/mod/semver"
 )
 
 const (
@@ -77,25 +78,9 @@ func CheckForUpdate(currentVersion string, forceCheck bool) (*UpdateInfo, error)
 	cleanVersion := strings.TrimPrefix(currentVersion, "v")
 	isDevBuild := isDevBuildVersion(cleanVersion)
 
-	cacheWindow := cacheDuration
-	if isDevBuild {
-		cacheWindow = devCacheDuration
-	}
 	if !forceCheck {
-		if cached, err := loadCache(); err == nil {
-			if time.Since(cached.CheckedAt) < cacheWindow {
-				latestVersion := strings.TrimPrefix(cached.Version, "v")
-				if !isDevBuild && !isNewer(latestVersion, cleanVersion) {
-					return nil, nil
-				}
-				if isDevBuild {
-					return &UpdateInfo{
-						CurrentVersion: currentVersion,
-						LatestVersion:  cached.Version,
-						IsDevBuild:     true,
-					}, nil
-				}
-			}
+		if info, done := checkCache(currentVersion, cleanVersion, isDevBuild); done {
+			return info, nil
 		}
 	}
 
@@ -169,6 +154,17 @@ func PerformUpdate(info *UpdateInfo, progressFn func(downloaded, total int64)) e
 		return fmt.Errorf("extract: %w", err)
 	}
 
+	srcPath := filepath.Join(extractDir, "msgvault")
+	return installBinary(srcPath)
+}
+
+// installBinary installs a new binary from srcPath to the current executable's location.
+// It creates a backup, copies the new binary, and cleans up on success.
+func installBinary(srcPath string) error {
+	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+		return fmt.Errorf("binary not found in archive")
+	}
+
 	currentExe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("find current executable: %w", err)
@@ -178,26 +174,34 @@ func PerformUpdate(info *UpdateInfo, progressFn func(downloaded, total int64)) e
 		return fmt.Errorf("resolve symlinks: %w", err)
 	}
 	binDir := filepath.Dir(currentExe)
-
-	srcPath := filepath.Join(extractDir, "msgvault")
 	dstPath := filepath.Join(binDir, "msgvault")
-	backupPath := dstPath + ".old"
-
-	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		return fmt.Errorf("binary not found in archive")
-	}
 
 	fmt.Printf("Installing msgvault to %s... ", binDir)
+	if err := installBinaryTo(srcPath, dstPath); err != nil {
+		return err
+	}
+	fmt.Println("OK")
+	return nil
+}
 
+// installBinaryTo performs the actual binary installation with backup/restore logic.
+// This is separated from installBinary for testability.
+func installBinaryTo(srcPath, dstPath string) error {
+	backupPath := dstPath + ".old"
+
+	// Remove any stale backup from a previous update
 	os.Remove(backupPath)
 
+	// Backup existing binary if it exists
 	if _, err := os.Stat(dstPath); err == nil {
 		if err := os.Rename(dstPath, backupPath); err != nil {
 			return fmt.Errorf("backup: %w", err)
 		}
 	}
 
+	// Copy new binary
 	if err := copyFile(srcPath, dstPath); err != nil {
+		// Attempt to restore backup on failure
 		_ = os.Rename(backupPath, dstPath)
 		return fmt.Errorf("install: %w", err)
 	}
@@ -206,9 +210,9 @@ func PerformUpdate(info *UpdateInfo, progressFn func(downloaded, total int64)) e
 		return fmt.Errorf("chmod: %w", err)
 	}
 
+	// Clean up backup on success
 	os.Remove(backupPath)
 
-	fmt.Println("OK")
 	return nil
 }
 
@@ -462,6 +466,43 @@ func loadCache() (*cachedCheck, error) {
 	return &cached, nil
 }
 
+// checkCache checks if a valid cached update check exists.
+// Returns (info, true) if a cached result should be used (either an update or no update).
+// Returns (nil, false) if no valid cache exists and a fresh check is needed.
+func checkCache(currentVersion, cleanVersion string, isDevBuild bool) (*UpdateInfo, bool) {
+	cached, err := loadCache()
+	if err != nil {
+		return nil, false
+	}
+
+	cacheWindow := cacheDuration
+	if isDevBuild {
+		cacheWindow = devCacheDuration
+	}
+
+	if time.Since(cached.CheckedAt) >= cacheWindow {
+		return nil, false
+	}
+
+	latestVersion := strings.TrimPrefix(cached.Version, "v")
+
+	// Dev builds always show update info (no version comparison)
+	if isDevBuild {
+		return &UpdateInfo{
+			CurrentVersion: currentVersion,
+			LatestVersion:  cached.Version,
+			IsDevBuild:     true,
+		}, true
+	}
+
+	// For release builds, check if there's actually an update
+	if !isNewer(latestVersion, cleanVersion) {
+		return nil, true // No update available, but cache is valid
+	}
+
+	return nil, false // Update available but need fresh data for download info
+}
+
 func saveCache(version string) {
 	cached := cachedCheck{
 		CheckedAt: time.Now(),
@@ -503,131 +544,77 @@ func isDevBuildVersion(v string) bool {
 	return gitDescribePattern.MatchString(v)
 }
 
-// prereleaseTag returns the prerelease suffix (e.g. "rc1", "beta2") or "" if none.
-// Git-describe versions (e.g. 0.4.0-5-gabcdef) are NOT considered prerelease — they're dev builds.
-func prereleaseTag(v string) string {
-	v = strings.TrimPrefix(v, "v")
-	idx := strings.Index(v, "-")
-	if idx < 0 {
-		return ""
-	}
-	if gitDescribePattern.MatchString(v) {
-		return ""
-	}
-	return v[idx+1:]
-}
-
-// comparePrerelease compares two prerelease tags using semver-like rules:
-// split on "." and non-alpha/digit boundaries, compare numeric segments numerically.
-// Returns -1, 0, or 1.
-func comparePrerelease(a, b string) int {
-	sa := splitPrerelease(a)
-	sb := splitPrerelease(b)
-	for i := 0; i < len(sa) || i < len(sb); i++ {
-		if i >= len(sa) {
-			return -1
-		}
-		if i >= len(sb) {
-			return 1
-		}
-		ai, aIsNum := parseNum(sa[i])
-		bi, bIsNum := parseNum(sb[i])
-		if aIsNum && bIsNum {
-			if ai != bi {
-				if ai < bi {
-					return -1
-				}
-				return 1
-			}
-			continue
-		}
-		// Semver: numeric identifiers always have lower precedence than non-numeric
-		if aIsNum != bIsNum {
-			if aIsNum {
-				return -1
-			}
-			return 1
-		}
-		if sa[i] < sb[i] {
-			return -1
-		}
-		if sa[i] > sb[i] {
-			return 1
-		}
-	}
-	return 0
-}
-
-// splitPrerelease splits a prerelease string into segments on "." and
-// boundaries between alpha and numeric characters (e.g. "rc10" -> ["rc", "10"]).
-func splitPrerelease(s string) []string {
-	var parts []string
-	for _, dotPart := range strings.Split(s, ".") {
-		start := 0
-		for i := 1; i < len(dotPart); i++ {
-			prevDigit := dotPart[i-1] >= '0' && dotPart[i-1] <= '9'
-			curDigit := dotPart[i] >= '0' && dotPart[i] <= '9'
-			if prevDigit != curDigit {
-				parts = append(parts, dotPart[start:i])
-				start = i
-			}
-		}
-		parts = append(parts, dotPart[start:])
-	}
-	return parts
-}
-
-func parseNum(s string) (int, bool) {
-	var n int
-	if _, err := fmt.Sscanf(s, "%d", &n); err == nil && fmt.Sprintf("%d", n) == s {
-		return n, true
-	}
-	return 0, false
-}
-
 // isNewer returns true if v1 is newer than v2 (semver comparison).
 // Prerelease versions (e.g. -rc1) are considered older than the same base version.
+// Git-describe versions (e.g. 0.4.0-5-gabcdef) are treated as their base version.
 func isNewer(v1, v2 string) bool {
+	// Extract base semver to validate both are valid versions
 	base1 := extractBaseSemver(v1)
 	base2 := extractBaseSemver(v2)
-
-	if base2 == "" {
-		return false
-	}
-	if base1 == "" {
+	if base1 == "" || base2 == "" {
 		return false
 	}
 
-	parts1 := strings.Split(base1, ".")
-	parts2 := strings.Split(base2, ".")
+	// Normalize to semver format with "v" prefix
+	sv1 := normalizeSemver(v1)
+	sv2 := normalizeSemver(v2)
 
-	for i := 0; i < 3; i++ {
-		var n1, n2 int
-		if i < len(parts1) {
-			_, _ = fmt.Sscanf(parts1[i], "%d", &n1)
-		}
-		if i < len(parts2) {
-			_, _ = fmt.Sscanf(parts2[i], "%d", &n2)
-		}
-		if n1 > n2 {
-			return true
-		}
-		if n1 < n2 {
-			return false
-		}
+	return semver.Compare(sv1, sv2) > 0
+}
+
+// prereleaseNumericPattern matches prerelease identifiers consisting of letters followed
+// by digits (e.g., "rc10", "beta2", "alpha1") to normalize them for proper numeric comparison.
+// The pattern is anchored to avoid partial matches within identifiers like "rc10a".
+var prereleaseNumericPattern = regexp.MustCompile(`^([A-Za-z]+)(\d+)$`)
+
+// normalizeSemver converts a version string to semver format for comparison.
+// Git-describe versions are converted to their base version.
+// Prerelease tags are normalized to use dotted format for proper numeric comparison
+// (e.g., "rc10" becomes "rc.10" so that rc.10 > rc.2 numerically).
+func normalizeSemver(v string) string {
+	v = strings.TrimPrefix(v, "v")
+
+	// Strip git-describe suffix (e.g., "-5-gabcdef" or "-5-gabcdef-dirty")
+	if gitDescribePattern.MatchString(v) {
+		v = gitDescribePattern.ReplaceAllString(v, "")
 	}
 
-	// Same base version: release > prerelease, and compare prerelease tags
-	tag1 := prereleaseTag(v1)
-	tag2 := prereleaseTag(v2)
-	if tag1 == "" && tag2 != "" {
-		return true // v1 is release, v2 is prerelease
-	}
-	if tag1 != "" && tag2 != "" {
-		return comparePrerelease(tag1, tag2) > 0
+	// Normalize prerelease identifiers to dotted format for numeric comparison.
+	// Per semver spec, "rc10" is compared lexicographically (so rc10 < rc2).
+	// By converting to "rc.10", the numeric part is compared as an integer.
+	// Each dot-separated identifier is processed independently.
+	if idx := strings.Index(v, "-"); idx > 0 {
+		base := v[:idx]
+		prerelease := v[idx+1:]
+		prerelease = normalizePrereleaseIdentifiers(prerelease)
+		v = base + "-" + prerelease
 	}
 
-	return false
+	return "v" + v
+}
+
+// normalizePrereleaseIdentifiers processes each dot-separated prerelease identifier
+// and normalizes identifiers like "rc10" to "rc.10" for proper numeric comparison.
+// Identifiers with leading zeros in the numeric part are skipped to avoid creating
+// invalid semver numeric identifiers.
+func normalizePrereleaseIdentifiers(prerelease string) string {
+	parts := strings.Split(prerelease, ".")
+	var result []string
+	for _, part := range parts {
+		if matches := prereleaseNumericPattern.FindStringSubmatch(part); matches != nil {
+			letters, digits := matches[1], matches[2]
+			// Skip normalization if the numeric part has leading zeros,
+			// as that would create an invalid semver numeric identifier.
+			if len(digits) > 1 && digits[0] == '0' {
+				result = append(result, part)
+			} else {
+				result = append(result, letters, digits)
+			}
+		} else {
+			result = append(result, part)
+		}
+	}
+	return strings.Join(result, ".")
 }
 
 // FormatSize formats bytes as a human-readable string.

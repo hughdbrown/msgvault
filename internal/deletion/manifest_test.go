@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 // testManager creates a Manager in a temp directory for testing.
@@ -97,34 +100,15 @@ func (b *ManifestBuilder) Build() *Manifest {
 	return b.m
 }
 
-// AssertManifestEqual compares two manifests on their key fields, ignoring timestamps.
+// AssertManifestEqual compares two manifests structurally, ignoring timestamps.
 func AssertManifestEqual(t *testing.T, got, want *Manifest) {
 	t.Helper()
-	if got.Description != want.Description {
-		t.Errorf("Description: got %q, want %q", got.Description, want.Description)
+	opts := cmp.Options{
+		cmpopts.IgnoreFields(Manifest{}, "CreatedAt"),
+		cmpopts.IgnoreFields(Execution{}, "StartedAt", "CompletedAt"),
 	}
-	if !slices.Equal(got.GmailIDs, want.GmailIDs) {
-		t.Errorf("GmailIDs: got %v, want %v", got.GmailIDs, want.GmailIDs)
-	}
-	if got.Status != want.Status {
-		t.Errorf("Status: got %q, want %q", got.Status, want.Status)
-	}
-	if !slices.Equal(got.Filters.Senders, want.Filters.Senders) {
-		t.Errorf("Filters.Senders: got %v, want %v", got.Filters.Senders, want.Filters.Senders)
-	}
-	if got.Filters.After != want.Filters.After {
-		t.Errorf("Filters.After: got %q, want %q", got.Filters.After, want.Filters.After)
-	}
-	if want.Summary != nil {
-		if got.Summary == nil {
-			t.Fatal("Summary: got nil, want non-nil")
-		}
-		if got.Summary.MessageCount != want.Summary.MessageCount {
-			t.Errorf("Summary.MessageCount: got %d, want %d", got.Summary.MessageCount, want.Summary.MessageCount)
-		}
-		if got.Summary.TotalSizeBytes != want.Summary.TotalSizeBytes {
-			t.Errorf("Summary.TotalSizeBytes: got %d, want %d", got.Summary.TotalSizeBytes, want.Summary.TotalSizeBytes)
-		}
+	if diff := cmp.Diff(want, got, opts...); diff != "" {
+		t.Errorf("Manifest mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -492,12 +476,10 @@ func TestManager_CreateAndListManifests(t *testing.T) {
 	}
 
 	// Verify ordering: list should be sorted by CreatedAt (newest first)
-	for i := 1; i < len(pending); i++ {
-		if pending[i].CreatedAt.After(pending[i-1].CreatedAt) {
-			t.Errorf("ListPending() not sorted newest-first: %s (%v) should come before %s (%v)",
-				pending[i].ID, pending[i].CreatedAt,
-				pending[i-1].ID, pending[i-1].CreatedAt)
-		}
+	if !slices.IsSortedFunc(pending, func(a, b *Manifest) int {
+		return b.CreatedAt.Compare(a.CreatedAt)
+	}) {
+		t.Error("ListPending() not sorted newest-first")
 	}
 }
 
@@ -530,60 +512,50 @@ func TestManager_GetManifest_NotFound(t *testing.T) {
 	}
 }
 
-func TestManager_MoveManifest(t *testing.T) {
-	mgr := testManager(t)
-
-	// Create a pending manifest
-	m := createTestManifest(t, mgr, "move test")
-
-	// Move pending -> in_progress
-	if err := mgr.MoveManifest(m.ID, StatusPending, StatusInProgress); err != nil {
-		t.Fatalf("MoveManifest(pending->in_progress) error = %v", err)
+func TestManager_Transitions(t *testing.T) {
+	tests := []struct {
+		name string
+		// Chain of transitions to apply; last one is the transition under test.
+		chain   [][2]Status
+		wantErr bool
+		// Expected list counts after successful transitions: [pending, inProgress, completed, failed]
+		wantCounts [4]int
+	}{
+		{"pending->in_progress", [][2]Status{{StatusPending, StatusInProgress}}, false, [4]int{0, 1, 0, 0}},
+		{"in_progress->completed", [][2]Status{{StatusPending, StatusInProgress}, {StatusInProgress, StatusCompleted}}, false, [4]int{0, 0, 1, 0}},
+		{"in_progress->failed", [][2]Status{{StatusPending, StatusInProgress}, {StatusInProgress, StatusFailed}}, false, [4]int{0, 0, 0, 1}},
+		{"completed->pending (invalid)", [][2]Status{{StatusPending, StatusInProgress}, {StatusInProgress, StatusCompleted}, {StatusCompleted, StatusPending}}, true, [4]int{}},
+		{"pending->pending (invalid)", [][2]Status{{StatusPending, StatusPending}}, true, [4]int{}},
 	}
 
-	AssertManifestInState(t, mgr, m.ID, StatusInProgress)
-	assertListCount(t, mgr.ListPending, 0)
-	assertListCount(t, mgr.ListInProgress, 1)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := testManager(t)
+			m := createTestManifest(t, mgr, "transition test")
 
-	// Move in_progress -> completed
-	if err := mgr.MoveManifest(m.ID, StatusInProgress, StatusCompleted); err != nil {
-		t.Fatalf("MoveManifest(in_progress->completed) error = %v", err)
-	}
+			var err error
+			for _, step := range tc.chain {
+				err = mgr.MoveManifest(m.ID, step[0], step[1])
+				// Only the last step may error; earlier steps must succeed.
+				if err != nil {
+					break
+				}
+			}
 
-	AssertManifestInState(t, mgr, m.ID, StatusCompleted)
-	assertListCount(t, mgr.ListInProgress, 0)
-	assertListCount(t, mgr.ListCompleted, 1)
-}
+			if (err != nil) != tc.wantErr {
+				t.Errorf("MoveManifest() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				last := tc.chain[len(tc.chain)-1]
+				AssertManifestInState(t, mgr, m.ID, last[1])
 
-func TestManager_MoveManifest_ToFailed(t *testing.T) {
-	mgr := testManager(t)
-
-	m := createTestManifest(t, mgr, "fail test")
-
-	// Move pending -> in_progress -> failed
-	if err := mgr.MoveManifest(m.ID, StatusPending, StatusInProgress); err != nil {
-		t.Fatalf("MoveManifest(pending->in_progress) error = %v", err)
-	}
-	if err := mgr.MoveManifest(m.ID, StatusInProgress, StatusFailed); err != nil {
-		t.Fatalf("MoveManifest(in_progress->failed) error = %v", err)
-	}
-
-	AssertManifestInState(t, mgr, m.ID, StatusFailed)
-}
-
-func TestManager_MoveManifest_InvalidTransitions(t *testing.T) {
-	mgr := testManager(t)
-
-	m := createTestManifest(t, mgr, "invalid test")
-
-	// Cannot move from completed
-	if err := mgr.MoveManifest(m.ID, StatusCompleted, StatusPending); err == nil {
-		t.Error("MoveManifest(completed->pending) should error")
-	}
-
-	// Cannot move to pending
-	if err := mgr.MoveManifest(m.ID, StatusPending, StatusPending); err == nil {
-		t.Error("MoveManifest(pending->pending) should error")
+				// Verify list counts to ensure proper bookkeeping
+				assertListCount(t, mgr.ListPending, tc.wantCounts[0])
+				assertListCount(t, mgr.ListInProgress, tc.wantCounts[1])
+				assertListCount(t, mgr.ListCompleted, tc.wantCounts[2])
+				assertListCount(t, mgr.ListFailed, tc.wantCounts[3])
+			}
+		})
 	}
 }
 
@@ -701,6 +673,97 @@ func TestMethod_Values(t *testing.T) {
 	}
 	if MethodDelete != "delete" {
 		t.Errorf("MethodDelete = %q", MethodDelete)
+	}
+}
+
+// TestStatusDirMap verifies that statusDirMap contains all persisted statuses
+// and maps them to the expected directory names.
+func TestStatusDirMap(t *testing.T) {
+	// Verify all persistedStatuses have entries in statusDirMap
+	for _, status := range persistedStatuses {
+		dirName, ok := statusDirMap[status]
+		if !ok {
+			t.Errorf("persistedStatus %q missing from statusDirMap", status)
+			continue
+		}
+		if dirName == "" {
+			t.Errorf("statusDirMap[%q] is empty", status)
+		}
+	}
+
+	// Verify expected mappings
+	expectedMappings := map[Status]string{
+		StatusPending:    "pending",
+		StatusInProgress: "in_progress",
+		StatusCompleted:  "completed",
+		StatusFailed:     "failed",
+	}
+	for status, wantDir := range expectedMappings {
+		gotDir, ok := statusDirMap[status]
+		if !ok {
+			t.Errorf("statusDirMap missing entry for %q", status)
+			continue
+		}
+		if gotDir != wantDir {
+			t.Errorf("statusDirMap[%q] = %q, want %q", status, gotDir, wantDir)
+		}
+	}
+}
+
+// TestDirForStatus verifies that dirForStatus returns the correct path for each status.
+func TestDirForStatus(t *testing.T) {
+	mgr := testManager(t)
+
+	tests := []struct {
+		status  Status
+		wantDir string
+	}{
+		{StatusPending, "pending"},
+		{StatusInProgress, "in_progress"},
+		{StatusCompleted, "completed"},
+		{StatusFailed, "failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(string(tc.status), func(t *testing.T) {
+			got := mgr.dirForStatus(tc.status)
+			wantSuffix := string(filepath.Separator) + tc.wantDir
+			if !strings.HasSuffix(got, wantSuffix) {
+				t.Errorf("dirForStatus(%q) = %q, want suffix %q", tc.status, got, wantSuffix)
+			}
+		})
+	}
+}
+
+// TestPersistedStatusesComplete verifies that persistedStatuses includes all
+// statuses that should be persisted to disk.
+func TestPersistedStatusesComplete(t *testing.T) {
+	// All these statuses should be in persistedStatuses
+	requiredStatuses := []Status{
+		StatusPending,
+		StatusInProgress,
+		StatusCompleted,
+		StatusFailed,
+	}
+
+	for _, status := range requiredStatuses {
+		found := false
+		for _, ps := range persistedStatuses {
+			if ps == status {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Status %q should be in persistedStatuses but is not", status)
+		}
+	}
+
+	// StatusCancelled should NOT be in persistedStatuses (cancelled manifests are deleted)
+	for _, ps := range persistedStatuses {
+		if ps == StatusCancelled {
+			t.Errorf("StatusCancelled should not be in persistedStatuses")
+		}
 	}
 }
 

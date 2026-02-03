@@ -32,6 +32,12 @@ func TestStore_GetStats_Empty(t *testing.T) {
 	if stats.MessageCount != 0 {
 		t.Errorf("MessageCount = %d, want 0", stats.MessageCount)
 	}
+	if stats.ThreadCount != 0 {
+		t.Errorf("ThreadCount = %d, want 0", stats.ThreadCount)
+	}
+	if stats.SourceCount != 0 {
+		t.Errorf("SourceCount = %d, want 0", stats.SourceCount)
+	}
 }
 
 func TestStore_Source_CreateAndGet(t *testing.T) {
@@ -113,7 +119,7 @@ func TestStore_UpsertMessage(t *testing.T) {
 					WithSentAt(now).
 					WithReceivedAt(now.Add(time.Second)).
 					WithInternalDate(now).
-					WithAttachments(2).
+					WithAttachmentCount(2).
 					WithIsFromMe(true).
 					Build()
 			},
@@ -152,20 +158,15 @@ func TestStore_UpsertMessage(t *testing.T) {
 			}
 
 			// Verify updated fields are persisted
-			var gotSubject, gotSnippet string
-			var gotHasAttach bool
-			err = f.Store.DB().QueryRow(
-				`SELECT subject, snippet, has_attachments FROM messages WHERE id = ?`, msgID,
-			).Scan(&gotSubject, &gotSnippet, &gotHasAttach)
-			testutil.MustNoErr(t, err, "query updated message")
-			if gotSubject != "Updated Subject" {
-				t.Errorf("subject = %q, want %q", gotSubject, "Updated Subject")
+			got := f.GetMessageFields(msgID)
+			if got.Subject != "Updated Subject" {
+				t.Errorf("subject = %q, want %q", got.Subject, "Updated Subject")
 			}
-			if gotSnippet != "Updated snippet" {
-				t.Errorf("snippet = %q, want %q", gotSnippet, "Updated snippet")
+			if got.Snippet != "Updated snippet" {
+				t.Errorf("snippet = %q, want %q", got.Snippet, "Updated snippet")
 			}
-			if gotHasAttach != msg.HasAttachments {
-				t.Errorf("has_attachments = %v, want %v", gotHasAttach, msg.HasAttachments)
+			if got.HasAttachments != msg.HasAttachments {
+				t.Errorf("has_attachments = %v, want %v", got.HasAttachments, msg.HasAttachments)
 			}
 
 			// Verify stats show exactly one message
@@ -225,27 +226,23 @@ func TestStore_MessageRaw(t *testing.T) {
 }
 
 func TestStore_Participant(t *testing.T) {
-	st := testutil.NewTestStore(t)
+	f := storetest.New(t)
 
 	// Create participant
-	pid, err := st.EnsureParticipant("alice@example.com", "Alice Smith", "example.com")
-	testutil.MustNoErr(t, err, "EnsureParticipant()")
-
+	pid := f.EnsureParticipant("alice@example.com", "Alice Smith", "example.com")
 	if pid == 0 {
 		t.Error("participant ID should be non-zero")
 	}
 
-	// Get same participant
-	pid2, err := st.EnsureParticipant("alice@example.com", "Alice", "example.com")
-	testutil.MustNoErr(t, err, "EnsureParticipant() second call")
-
+	// Get same participant (should return existing)
+	pid2 := f.EnsureParticipant("alice@example.com", "Alice", "example.com")
 	if pid2 != pid {
 		t.Errorf("second call ID = %d, want %d", pid2, pid)
 	}
 }
 
 func TestStore_EnsureParticipantsBatch(t *testing.T) {
-	st := testutil.NewTestStore(t)
+	f := storetest.New(t)
 
 	addresses := []mime.Address{
 		{Email: "alice@example.com", Name: "Alice", Domain: "example.com"},
@@ -253,7 +250,7 @@ func TestStore_EnsureParticipantsBatch(t *testing.T) {
 		{Email: "", Name: "No Email", Domain: ""}, // Should be skipped
 	}
 
-	result, err := st.EnsureParticipantsBatch(addresses)
+	result, err := f.Store.EnsureParticipantsBatch(addresses)
 	testutil.MustNoErr(t, err, "EnsureParticipantsBatch()")
 
 	if len(result) != 2 {
@@ -290,10 +287,10 @@ func TestStore_Label(t *testing.T) {
 func TestStore_EnsureLabelsBatch(t *testing.T) {
 	f := storetest.New(t)
 
-	labels := map[string]string{
-		"INBOX":       "Inbox",
-		"SENT":        "Sent",
-		"Label_12345": "My Label",
+	labels := map[string]store.LabelInfo{
+		"INBOX":       {Name: "Inbox", Type: "system"},
+		"SENT":        {Name: "Sent", Type: "system"},
+		"Label_12345": {Name: "My Label", Type: "user"},
 	}
 
 	result, err := f.Store.EnsureLabelsBatch(f.Source.ID, labels)
@@ -333,9 +330,7 @@ func TestStore_MessageLabels(t *testing.T) {
 	f.AssertLabelCount(msgID, 1)
 
 	// Verify it's the right label
-	var labelID int64
-	err = f.Store.DB().QueryRow(f.Store.Rebind("SELECT label_id FROM message_labels WHERE message_id = ?"), msgID).Scan(&labelID)
-	testutil.MustNoErr(t, err, "get label_id")
+	labelID := f.GetSingleLabelID(msgID)
 	if labelID != labels["SENT"] {
 		t.Errorf("label_id = %d, want %d (SENT)", labelID, labels["SENT"])
 	}
@@ -362,9 +357,7 @@ func TestStore_MessageRecipients(t *testing.T) {
 	f.AssertRecipientCount(msgID, "to", 1)
 
 	// Verify it's the right recipient
-	var participantID int64
-	err = f.Store.DB().QueryRow(f.Store.Rebind("SELECT participant_id FROM message_recipients WHERE message_id = ? AND recipient_type = 'to'"), msgID).Scan(&participantID)
-	testutil.MustNoErr(t, err, "get participant_id")
+	participantID := f.GetSingleRecipientID(msgID, "to")
 	if participantID != pid1 {
 		t.Errorf("participant_id = %d, want %d (alice)", participantID, pid1)
 	}
@@ -388,7 +381,7 @@ func TestStore_Attachment(t *testing.T) {
 
 	msgID := storetest.NewMessage(f.Source.ID, f.ConvID).
 		WithSourceMessageID("msg-1").
-		WithAttachments(1).
+		WithAttachmentCount(1).
 		Create(t, f.Store)
 
 	err := f.Store.UpsertAttachment(msgID, "document.pdf", "application/pdf", "/path/to/file", "abc123hash", 1024)
@@ -469,9 +462,7 @@ func TestStore_SyncFail(t *testing.T) {
 	f.AssertNoActiveSync()
 
 	// Verify sync status is "failed" and error message is stored
-	var status, errorMsg string
-	err = f.Store.DB().QueryRow(f.Store.Rebind("SELECT status, error_message FROM sync_runs WHERE id = ?"), syncID).Scan(&status, &errorMsg)
-	testutil.MustNoErr(t, err, "query sync status")
+	status, errorMsg := f.GetSyncRun(syncID)
 	if status != "failed" {
 		t.Errorf("sync status = %q, want %q", status, "failed")
 	}
@@ -499,10 +490,10 @@ func TestStore_MarkMessageDeletedByGmailID(t *testing.T) {
 }
 
 func TestStore_GetMessageRaw_NotFound(t *testing.T) {
-	st := testutil.NewTestStore(t)
+	f := storetest.New(t)
 
 	// Try to get raw for non-existent message
-	_, err := st.GetMessageRaw(99999)
+	_, err := f.Store.GetMessageRaw(99999)
 	if err == nil {
 		t.Error("GetMessageRaw() should error for non-existent message")
 	}
@@ -542,10 +533,8 @@ func TestStore_UpsertMessageBody(t *testing.T) {
 	)
 	testutil.MustNoErr(t, err, "UpsertMessageBody()")
 
-	// Verify via direct query
-	var bodyText, bodyHTML sql.NullString
-	err = f.Store.DB().QueryRow("SELECT body_text, body_html FROM message_bodies WHERE message_id = ?", msgID).Scan(&bodyText, &bodyHTML)
-	testutil.MustNoErr(t, err, "query message_bodies")
+	// Verify via helper
+	bodyText, bodyHTML := f.GetMessageBody(msgID)
 	if bodyText.String != "hello text" {
 		t.Errorf("body_text = %q, want %q", bodyText.String, "hello text")
 	}
@@ -559,8 +548,7 @@ func TestStore_UpsertMessageBody(t *testing.T) {
 		sql.NullString{},
 	)
 	testutil.MustNoErr(t, err, "UpsertMessageBody() update")
-	err = f.Store.DB().QueryRow("SELECT body_text, body_html FROM message_bodies WHERE message_id = ?", msgID).Scan(&bodyText, &bodyHTML)
-	testutil.MustNoErr(t, err, "query after update")
+	bodyText, bodyHTML = f.GetMessageBody(msgID)
 	if bodyText.String != "updated text" {
 		t.Errorf("after update: body_text = %q, want %q", bodyText.String, "updated text")
 	}
@@ -641,9 +629,9 @@ func TestStore_GetLastSuccessfulSync_None(t *testing.T) {
 }
 
 func TestStore_GetSourceByIdentifier_NotFound(t *testing.T) {
-	st := testutil.NewTestStore(t)
+	f := storetest.New(t)
 
-	source, err := st.GetSourceByIdentifier("nonexistent@example.com")
+	source, err := f.Store.GetSourceByIdentifier("nonexistent@example.com")
 	testutil.MustNoErr(t, err, "GetSourceByIdentifier()")
 	if source != nil {
 		t.Errorf("expected nil source, got %+v", source)
@@ -664,6 +652,37 @@ func TestStore_GetStats_WithData(t *testing.T) {
 	}
 	if stats.ThreadCount == 0 {
 		t.Error("ThreadCount should be non-zero")
+	}
+}
+
+func TestStore_GetStats_ClosedDB(t *testing.T) {
+	st := testutil.NewTestStore(t)
+
+	// Close the database
+	err := st.Close()
+	testutil.MustNoErr(t, err, "Close()")
+
+	// GetStats should return an error for closed DB (not silently ignore)
+	_, err = st.GetStats()
+	if err == nil {
+		t.Error("GetStats() should return error on closed DB")
+	}
+}
+
+func TestStore_GetStats_MissingTable(t *testing.T) {
+	st := testutil.NewTestStore(t)
+
+	// Drop a table to simulate missing table scenario
+	_, err := st.DB().Exec("DROP TABLE IF EXISTS attachments")
+	testutil.MustNoErr(t, err, "DROP TABLE attachments")
+
+	// GetStats should ignore missing tables and return partial stats
+	stats, err := st.GetStats()
+	testutil.MustNoErr(t, err, "GetStats() with missing table")
+
+	// AttachmentCount should be 0 (table missing, ignored)
+	if stats.AttachmentCount != 0 {
+		t.Errorf("AttachmentCount = %d, want 0 for missing table", stats.AttachmentCount)
 	}
 }
 
@@ -791,4 +810,61 @@ func TestStore_GetRandomMessageIDs_ExcludesDeleted(t *testing.T) {
 	if len(ids) != 3 {
 		t.Errorf("len(ids) = %d, want 3 (5 total - 2 deleted)", len(ids))
 	}
+}
+
+func TestStore_ReplaceMessageRecipients_LargeBatch(t *testing.T) {
+	f := storetest.New(t)
+
+	msgID := f.CreateMessage("msg-large-recipients")
+
+	// Create 300 participants (exceeds SQLite limit of ~249 rows with 4 params each)
+	const numRecipients = 300
+	participantIDs := make([]int64, numRecipients)
+	displayNames := make([]string, numRecipients)
+	for i := 0; i < numRecipients; i++ {
+		email := fmt.Sprintf("user%d@example.com", i)
+		pid := f.EnsureParticipant(email, fmt.Sprintf("User %d", i), "example.com")
+		participantIDs[i] = pid
+		displayNames[i] = fmt.Sprintf("User %d", i)
+	}
+
+	// This should work without hitting SQLite parameter limit
+	err := f.Store.ReplaceMessageRecipients(msgID, "to", participantIDs, displayNames)
+	testutil.MustNoErr(t, err, "ReplaceMessageRecipients(300 recipients)")
+
+	f.AssertRecipientCount(msgID, "to", numRecipients)
+
+	// Replace with a different large batch to ensure chunked delete+insert works
+	err = f.Store.ReplaceMessageRecipients(msgID, "to", participantIDs[:150], displayNames[:150])
+	testutil.MustNoErr(t, err, "ReplaceMessageRecipients(150 recipients)")
+
+	f.AssertRecipientCount(msgID, "to", 150)
+}
+
+func TestStore_ReplaceMessageLabels_LargeBatch(t *testing.T) {
+	f := storetest.New(t)
+
+	msgID := f.CreateMessage("msg-large-labels")
+
+	// Create 600 labels (exceeds SQLite limit of ~499 rows with 2 params each)
+	const numLabels = 600
+	labelIDs := make([]int64, numLabels)
+	for i := 0; i < numLabels; i++ {
+		sourceLabelID := fmt.Sprintf("Label_%d", i)
+		lid, err := f.Store.EnsureLabel(f.Source.ID, sourceLabelID, fmt.Sprintf("Label %d", i), "user")
+		testutil.MustNoErr(t, err, "EnsureLabel")
+		labelIDs[i] = lid
+	}
+
+	// This should work without hitting SQLite parameter limit
+	err := f.Store.ReplaceMessageLabels(msgID, labelIDs)
+	testutil.MustNoErr(t, err, "ReplaceMessageLabels(600 labels)")
+
+	f.AssertLabelCount(msgID, numLabels)
+
+	// Replace with a different large batch to ensure chunked delete+insert works
+	err = f.Store.ReplaceMessageLabels(msgID, labelIDs[:250])
+	testutil.MustNoErr(t, err, "ReplaceMessageLabels(250 labels)")
+
+	f.AssertLabelCount(msgID, 250)
 }

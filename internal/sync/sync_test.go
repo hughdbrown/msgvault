@@ -18,22 +18,12 @@ func TestFullSync(t *testing.T) {
 	env.Mock.Messages["msg3"].LabelIDs = []string{"SENT"}
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 3, 0, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(3), Errors: intPtr(0)})
 	if summary.FinalHistoryID != 12345 {
 		t.Errorf("expected history ID 12345, got %d", summary.FinalHistoryID)
 	}
 
-	// Verify API calls
-	if env.Mock.ProfileCalls != 1 {
-		t.Errorf("expected 1 profile call, got %d", env.Mock.ProfileCalls)
-	}
-	if env.Mock.LabelsCalls != 1 {
-		t.Errorf("expected 1 labels call, got %d", env.Mock.LabelsCalls)
-	}
-	if len(env.Mock.GetMessageCalls) != 3 {
-		t.Errorf("expected 3 message fetches, got %d", len(env.Mock.GetMessageCalls))
-	}
-
+	assertMockCalls(t, env, 1, 1, 3)
 	assertMessageCount(t, env.Store, 3)
 }
 
@@ -45,7 +35,7 @@ func TestFullSyncResume(t *testing.T) {
 	seedPagedMessages(env, 4, 2, "msg")
 
 	summary1 := runFullSync(t, env)
-	assertSummary(t, summary1, 4, -1, -1, -1)
+	assertSummary(t, summary1, WantSummary{Added: intPtr(4)})
 
 	// Second sync should skip already-synced messages
 	env.Mock.Reset()
@@ -54,13 +44,13 @@ func TestFullSyncResume(t *testing.T) {
 		MessagesTotal: 4,
 		HistoryID:     12346,
 	}
-	env.Mock.AddMessage("msg1", testMIME, []string{"INBOX"})
-	env.Mock.AddMessage("msg2", testMIME, []string{"INBOX"})
-	env.Mock.AddMessage("msg3", testMIME, []string{"INBOX"})
-	env.Mock.AddMessage("msg4", testMIME, []string{"INBOX"})
+	env.Mock.AddMessage("msg1", testMIME(), []string{"INBOX"})
+	env.Mock.AddMessage("msg2", testMIME(), []string{"INBOX"})
+	env.Mock.AddMessage("msg3", testMIME(), []string{"INBOX"})
+	env.Mock.AddMessage("msg4", testMIME(), []string{"INBOX"})
 
 	summary2 := runFullSync(t, env)
-	assertSummary(t, summary2, 0, -1, -1, -1)
+	assertSummary(t, summary2, WantSummary{Added: intPtr(0)})
 }
 
 func TestFullSyncWithErrors(t *testing.T) {
@@ -71,7 +61,7 @@ func TestFullSyncWithErrors(t *testing.T) {
 	env.Mock.GetMessageError["msg2"] = &gmail.NotFoundError{Path: "/messages/msg2"}
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 2, 1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(2), Errors: intPtr(1)})
 }
 
 func TestMIMEParsing(t *testing.T) {
@@ -99,7 +89,7 @@ func TestMIMEParsing(t *testing.T) {
 	})
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 1, -1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(1)})
 	assertAttachmentCount(t, env.Store, 1)
 }
 
@@ -109,7 +99,7 @@ func TestFullSyncEmptyInbox(t *testing.T) {
 	env.Mock.Profile.HistoryID = 12345
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 0, -1, -1, 0)
+	assertSummary(t, summary, WantSummary{Added: intPtr(0), Found: intPtr(0)})
 }
 
 func TestFullSyncProfileError(t *testing.T) {
@@ -131,7 +121,7 @@ func TestFullSyncAllDuplicates(t *testing.T) {
 
 	// Second sync with same messages - all should be skipped
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 0, -1, 3, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(0), Skipped: intPtr(3)})
 }
 
 func TestFullSyncNoResume(t *testing.T) {
@@ -146,7 +136,7 @@ func TestFullSyncNoResume(t *testing.T) {
 	if summary.WasResumed {
 		t.Error("expected WasResumed to be false with NoResume option")
 	}
-	assertSummary(t, summary, 2, -1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(2)})
 }
 
 func TestFullSyncAllErrors(t *testing.T) {
@@ -158,7 +148,7 @@ func TestFullSyncAllErrors(t *testing.T) {
 	env.Mock.GetMessageError["msg3"] = &gmail.NotFoundError{Path: "/messages/msg3"}
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 0, 3, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(0), Errors: intPtr(3)})
 }
 
 func TestFullSyncWithQuery(t *testing.T) {
@@ -174,7 +164,7 @@ func TestFullSyncWithQuery(t *testing.T) {
 	if env.Mock.LastQuery != "before:2024/06/01" {
 		t.Errorf("expected query %q, got %q", "before:2024/06/01", env.Mock.LastQuery)
 	}
-	assertSummary(t, summary, 2, -1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(2)})
 }
 
 func TestFullSyncPagination(t *testing.T) {
@@ -183,11 +173,8 @@ func TestFullSyncPagination(t *testing.T) {
 	seedPagedMessages(env, 6, 2, "msg")
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 6, -1, -1, -1)
-
-	if env.Mock.ListMessagesCalls != 3 {
-		t.Errorf("expected 3 list calls (one per page), got %d", env.Mock.ListMessagesCalls)
-	}
+	assertSummary(t, summary, WantSummary{Added: intPtr(6)})
+	assertListMessagesCalls(t, env, 3)
 }
 
 func TestSyncerWithLogger(t *testing.T) {
@@ -220,7 +207,7 @@ func TestIncrementalSyncNoSource(t *testing.T) {
 func TestIncrementalSyncNoHistoryID(t *testing.T) {
 	env := newTestEnv(t)
 
-	env.MustCreateSource(t)
+	env.CreateSource(t)
 
 	_, err := env.Syncer.Incremental(env.Context, testEmail)
 	if err == nil {
@@ -230,23 +217,23 @@ func TestIncrementalSyncNoHistoryID(t *testing.T) {
 
 func TestIncrementalSyncAlreadyUpToDate(t *testing.T) {
 	env := newTestEnv(t)
-	env.SetupSource(t, "12345")
+	env.CreateSourceWithHistory(t, "12345")
 
 	env.Mock.Profile.MessagesTotal = 10
 	env.Mock.Profile.HistoryID = 12345 // Same as cursor
 
 	summary := runIncrementalSync(t, env)
-	assertSummary(t, summary, 0, -1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(0)})
 }
 
 func TestIncrementalSyncWithChanges(t *testing.T) {
 	env := newTestEnv(t)
-	env.SetupSource(t, "12340")
+	env.CreateSourceWithHistory(t, "12340")
 
 	env.Mock.Profile.MessagesTotal = 10
 	env.Mock.Profile.HistoryID = 12350
-	env.Mock.AddMessage("new-msg-1", testMIME, []string{"INBOX"})
-	env.Mock.AddMessage("new-msg-2", testMIME, []string{"INBOX"})
+	env.Mock.AddMessage("new-msg-1", testMIME(), []string{"INBOX"})
+	env.Mock.AddMessage("new-msg-2", testMIME(), []string{"INBOX"})
 
 	env.SetHistory(12350,
 		historyAdded("new-msg-1"),
@@ -254,7 +241,7 @@ func TestIncrementalSyncWithChanges(t *testing.T) {
 	)
 
 	summary := runIncrementalSync(t, env)
-	assertSummary(t, summary, 2, -1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(2)})
 }
 
 func TestIncrementalSyncWithDeletions(t *testing.T) {
@@ -267,7 +254,7 @@ func TestIncrementalSyncWithDeletions(t *testing.T) {
 	env.SetHistory(12350, historyDeleted("msg1"))
 
 	summary := runIncrementalSync(t, env)
-	assertSummary(t, summary, -1, -1, -1, 1)
+	assertSummary(t, summary, WantSummary{Found: intPtr(1)})
 
 	// Verify deletion was persisted
 	assertDeletedFromSource(t, env.Store, "msg1", true)
@@ -276,7 +263,7 @@ func TestIncrementalSyncWithDeletions(t *testing.T) {
 
 func TestIncrementalSyncHistoryExpired(t *testing.T) {
 	env := newTestEnv(t)
-	env.SetupSource(t, "1000")
+	env.CreateSourceWithHistory(t, "1000")
 
 	env.Mock.Profile.MessagesTotal = 10
 	env.Mock.Profile.HistoryID = 12350
@@ -290,7 +277,7 @@ func TestIncrementalSyncHistoryExpired(t *testing.T) {
 
 func TestIncrementalSyncProfileError(t *testing.T) {
 	env := newTestEnv(t)
-	env.SetupSource(t, "12345")
+	env.CreateSourceWithHistory(t, "12345")
 	env.Mock.ProfileError = fmt.Errorf("auth failed")
 
 	_, err := env.Syncer.Incremental(env.Context, testEmail)
@@ -303,7 +290,7 @@ func TestIncrementalSyncWithLabelAdded(t *testing.T) {
 	env := newTestEnv(t)
 	env.Mock.Profile.MessagesTotal = 1
 	env.Mock.Profile.HistoryID = 12340
-	env.Mock.AddMessage("msg1", testMIME, []string{"INBOX"})
+	env.Mock.AddMessage("msg1", testMIME(), []string{"INBOX"})
 
 	runFullSync(t, env)
 
@@ -312,14 +299,14 @@ func TestIncrementalSyncWithLabelAdded(t *testing.T) {
 	env.Mock.Messages["msg1"].LabelIDs = []string{"INBOX", "STARRED"}
 
 	summary := runIncrementalSync(t, env)
-	assertSummary(t, summary, -1, -1, -1, 1)
+	assertSummary(t, summary, WantSummary{Found: intPtr(1)})
 }
 
 func TestIncrementalSyncWithLabelRemoved(t *testing.T) {
 	env := newTestEnv(t)
 	env.Mock.Profile.MessagesTotal = 1
 	env.Mock.Profile.HistoryID = 12340
-	env.Mock.AddMessage("msg1", testMIME, []string{"INBOX", "STARRED"})
+	env.Mock.AddMessage("msg1", testMIME(), []string{"INBOX", "STARRED"})
 
 	runFullSync(t, env)
 
@@ -328,12 +315,12 @@ func TestIncrementalSyncWithLabelRemoved(t *testing.T) {
 	env.Mock.Messages["msg1"].LabelIDs = []string{"INBOX"}
 
 	summary := runIncrementalSync(t, env)
-	assertSummary(t, summary, -1, -1, -1, 1)
+	assertSummary(t, summary, WantSummary{Found: intPtr(1)})
 }
 
 func TestIncrementalSyncLabelAddedToNewMessage(t *testing.T) {
 	env := newTestEnv(t)
-	source := env.SetupSource(t, "12340")
+	source := env.CreateSourceWithHistory(t, "12340")
 	if _, err := env.Store.EnsureLabel(source.ID, "INBOX", "Inbox", "system"); err != nil {
 		t.Fatalf("EnsureLabel INBOX: %v", err)
 	}
@@ -343,7 +330,7 @@ func TestIncrementalSyncLabelAddedToNewMessage(t *testing.T) {
 
 	env.Mock.Profile.MessagesTotal = 1
 	env.Mock.Profile.HistoryID = 12350
-	env.Mock.AddMessage("new-msg", testMIME, []string{"INBOX", "STARRED"})
+	env.Mock.AddMessage("new-msg", testMIME(), []string{"INBOX", "STARRED"})
 
 	env.SetHistory(12350, historyLabelAdded("new-msg", "STARRED"))
 
@@ -357,7 +344,7 @@ func TestIncrementalSyncLabelAddedToNewMessage(t *testing.T) {
 
 func TestIncrementalSyncLabelRemovedFromMissingMessage(t *testing.T) {
 	env := newTestEnv(t)
-	env.SetupSource(t, "12340")
+	env.CreateSourceWithHistory(t, "12340")
 
 	env.Mock.Profile.MessagesTotal = 1
 	env.Mock.Profile.HistoryID = 12350
@@ -365,19 +352,19 @@ func TestIncrementalSyncLabelRemovedFromMissingMessage(t *testing.T) {
 	env.SetHistory(12350, historyLabelRemoved("unknown-msg", "STARRED"))
 
 	summary := runIncrementalSync(t, env)
-	assertSummary(t, summary, 0, -1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(0)})
 }
 
 func TestFullSyncWithAttachment(t *testing.T) {
 	env := newTestEnv(t)
 	env.Mock.Profile.MessagesTotal = 1
 	env.Mock.Profile.HistoryID = 12345
-	env.Mock.AddMessage("msg-with-attachment", testMIMEWithAttachment, []string{"INBOX"})
+	env.Mock.AddMessage("msg-with-attachment", testMIMEWithAttachment(), []string{"INBOX"})
 
 	attachDir := withAttachmentsDir(t, env)
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 1, -1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(1)})
 
 	if _, err := os.Stat(attachDir); os.IsNotExist(err) {
 		t.Error("attachments directory should have been created")
@@ -409,8 +396,8 @@ func TestFullSyncAttachmentDeduplication(t *testing.T) {
 	env := newTestEnv(t)
 	env.Mock.Profile.MessagesTotal = 2
 	env.Mock.Profile.HistoryID = 12345
-	env.Mock.AddMessage("msg1-attach", testMIMEWithAttachment, []string{"INBOX"})
-	env.Mock.AddMessage("msg2-attach", testMIMEWithAttachment, []string{"INBOX"})
+	env.Mock.AddMessage("msg1-attach", testMIMEWithAttachment(), []string{"INBOX"})
+	env.Mock.AddMessage("msg2-attach", testMIMEWithAttachment(), []string{"INBOX"})
 
 	attachDir := withAttachmentsDir(t, env)
 
@@ -422,31 +409,68 @@ func TestFullSyncAttachmentDeduplication(t *testing.T) {
 	}
 }
 
-func TestFullSyncNoSubject(t *testing.T) {
-	env := newTestEnv(t)
-	env.Mock.Profile.MessagesTotal = 1
-	env.Mock.Profile.HistoryID = 12345
-	env.Mock.AddMessage("msg-no-subject", testMIMENoSubject, []string{"INBOX"})
+// TestFullSync_MessageVariations consolidates tests for various MIME message formats.
+func TestFullSync_MessageVariations(t *testing.T) {
+	tests := []struct {
+		name  string
+		mime  func() []byte
+		check func(*testing.T, *TestEnv)
+	}{
+		{
+			name: "NoSubject",
+			mime: testMIMENoSubject,
+		},
+		{
+			name: "MultipleRecipients",
+			mime: testMIMEMultipleRecipients,
+		},
+		{
+			name: "HTMLOnly",
+			mime: func() []byte {
+				return testemail.NewMessage().
+					Subject("HTML Only").
+					ContentType(`text/html; charset="utf-8"`).
+					Body("<html><body><p>This is HTML only content.</p></body></html>").
+					Bytes()
+			},
+		},
+		{
+			name: "DuplicateRecipients",
+			mime: testMIMEDuplicateRecipients,
+			check: func(t *testing.T, env *TestEnv) {
+				assertRecipientCount(t, env.Store, "msg", "to", 2)
+				assertRecipientCount(t, env.Store, "msg", "cc", 1)
+				assertRecipientCount(t, env.Store, "msg", "bcc", 1)
+				assertDisplayName(t, env.Store, "msg", "to", "duplicate@example.com", "Duplicate Person")
+				assertDisplayName(t, env.Store, "msg", "cc", "cc-dup@example.com", "CC Duplicate")
+			},
+		},
+	}
 
-	summary := runFullSync(t, env)
-	assertSummary(t, summary, 1, -1, -1, -1)
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			seedMessages(env, 1, 12345, "msg")
+			raw := tt.mime()
+			env.Mock.Messages["msg"].Raw = raw
+			env.Mock.Messages["msg"].SizeEstimate = int64(len(raw))
 
-func TestFullSyncMultipleRecipients(t *testing.T) {
-	env := newTestEnv(t)
-	env.Mock.Profile.MessagesTotal = 1
-	env.Mock.Profile.HistoryID = 12345
-	env.Mock.AddMessage("msg-multi-recip", testMIMEMultipleRecipients, []string{"INBOX"})
+			summary := runFullSync(t, env)
+			assertSummary(t, summary, WantSummary{Added: intPtr(1), Errors: intPtr(0)})
+			assertMessageCount(t, env.Store, 1)
 
-	summary := runFullSync(t, env)
-	assertSummary(t, summary, 1, -1, -1, -1)
+			if tt.check != nil {
+				tt.check(t, env)
+			}
+		})
+	}
 }
 
 func TestFullSyncWithMIMEParseError(t *testing.T) {
 	env := newTestEnv(t)
 	env.Mock.Profile.MessagesTotal = 2
 	env.Mock.Profile.HistoryID = 12345
-	env.Mock.AddMessage("msg-good", testMIME, []string{"INBOX"})
+	env.Mock.AddMessage("msg-good", testMIME(), []string{"INBOX"})
 	env.Mock.Messages["msg-bad"] = &gmail.RawMessage{
 		ID:           "msg-bad",
 		ThreadID:     "thread_msg-bad",
@@ -457,7 +481,7 @@ func TestFullSyncWithMIMEParseError(t *testing.T) {
 	}
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 2, 0, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(2), Errors: intPtr(0)})
 
 	// Verify the bad message was stored with placeholder content
 	assertBodyContains(t, env.Store, "msg-bad", "MIME parsing failed")
@@ -468,17 +492,17 @@ func TestFullSyncMessageFetchError(t *testing.T) {
 	env := newTestEnv(t)
 	env.Mock.Profile.MessagesTotal = 2
 	env.Mock.Profile.HistoryID = 12345
-	env.Mock.AddMessage("msg-good", testMIME, []string{"INBOX"})
+	env.Mock.AddMessage("msg-good", testMIME(), []string{"INBOX"})
 
 	env.Mock.MessagePages = [][]string{{"msg-good", "msg-missing"}}
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 1, -1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(1)})
 }
 
 func TestIncrementalSyncLabelsError(t *testing.T) {
 	env := newTestEnv(t)
-	env.SetupSource(t, "12340")
+	env.CreateSourceWithHistory(t, "12340")
 
 	env.Mock.Profile.MessagesTotal = 1
 	env.Mock.Profile.HistoryID = 12350
@@ -495,7 +519,7 @@ func TestFullSyncResumeWithCursor(t *testing.T) {
 	env.Mock.Profile.HistoryID = 12345
 	seedPagedMessages(env, 4, 2, "msg")
 
-	source := env.MustCreateSource(t)
+	source := env.CreateSource(t)
 
 	// Process just page 1
 	env.Mock.MessagePages = [][]string{{"msg1", "msg2"}}
@@ -531,49 +555,10 @@ func TestFullSyncResumeWithCursor(t *testing.T) {
 	if summary.ResumedFromToken != "page_1" {
 		t.Errorf("expected ResumedFromToken = 'page_1', got %q", summary.ResumedFromToken)
 	}
-	assertSummary(t, summary, 4, -1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(4)})
 
-	if env.Mock.ListMessagesCalls != 1 {
-		t.Errorf("expected 1 ListMessages call (resumed from page_1), got %d", env.Mock.ListMessagesCalls)
-	}
+	assertListMessagesCalls(t, env, 1)
 	assertMessageCount(t, env.Store, 4)
-}
-
-func TestFullSyncHTMLOnlyMessage(t *testing.T) {
-	env := newTestEnv(t)
-
-	htmlOnlyMIME := testemail.NewMessage().
-		Subject("HTML Only").
-		ContentType(`text/html; charset="utf-8"`).
-		Body("<html><body><p>This is HTML only content.</p></body></html>").
-		Bytes()
-
-	env.Mock.Profile.MessagesTotal = 1
-	env.Mock.Profile.HistoryID = 12345
-	env.Mock.AddMessage("msg-html-only", htmlOnlyMIME, []string{"INBOX"})
-
-	summary := runFullSync(t, env)
-	assertSummary(t, summary, 1, -1, -1, -1)
-}
-
-func TestFullSyncDuplicateRecipients(t *testing.T) {
-	env := newTestEnv(t)
-	env.Mock.Profile.MessagesTotal = 1
-	env.Mock.Profile.HistoryID = 12345
-	env.Mock.AddMessage("msg-dup-recip", testMIMEDuplicateRecipients, []string{"INBOX"})
-
-	summary := runFullSync(t, env)
-	assertSummary(t, summary, 1, 0, -1, -1)
-	assertMessageCount(t, env.Store, 1)
-
-	// Verify recipients are deduplicated
-	assertRecipientCount(t, env.Store, "msg-dup-recip", "to", 2)
-	assertRecipientCount(t, env.Store, "msg-dup-recip", "cc", 1)
-	assertRecipientCount(t, env.Store, "msg-dup-recip", "bcc", 1)
-
-	// Verify display name preference: non-empty name preferred
-	assertDisplayName(t, env.Store, "msg-dup-recip", "to", "duplicate@example.com", "Duplicate Person")
-	assertDisplayName(t, env.Store, "msg-dup-recip", "cc", "cc-dup@example.com", "CC Duplicate")
 }
 
 func TestFullSyncDateFallbackToInternalDate(t *testing.T) {
@@ -606,7 +591,7 @@ func TestFullSyncEmptyRawMIME(t *testing.T) {
 	env.Mock.Profile.MessagesTotal = 2
 	env.Mock.Profile.HistoryID = 12345
 
-	env.Mock.AddMessage("msg-good", testMIME, []string{"INBOX"})
+	env.Mock.AddMessage("msg-good", testMIME(), []string{"INBOX"})
 	env.Mock.Messages["msg-empty-raw"] = &gmail.RawMessage{
 		ID:           "msg-empty-raw",
 		ThreadID:     "thread-empty-raw",
@@ -616,7 +601,7 @@ func TestFullSyncEmptyRawMIME(t *testing.T) {
 	}
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 1, 1, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(1), Errors: intPtr(1)})
 }
 
 func TestFullSyncEmptyThreadID(t *testing.T) {
@@ -625,17 +610,18 @@ func TestFullSyncEmptyThreadID(t *testing.T) {
 	env.Mock.Profile.HistoryID = 12345
 	env.Mock.UseRawThreadID = true
 
+	raw := testMIME()
 	env.Mock.Messages["msg-no-thread"] = &gmail.RawMessage{
 		ID:           "msg-no-thread",
 		ThreadID:     "",
 		LabelIDs:     []string{"INBOX"},
-		Raw:          testMIME,
-		SizeEstimate: int64(len(testMIME)),
+		Raw:          raw,
+		SizeEstimate: int64(len(raw)),
 	}
 	env.Mock.MessagePages = [][]string{{"msg-no-thread"}}
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 1, 0, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(1), Errors: intPtr(0)})
 
 	assertThreadSourceID(t, env.Store, "msg-no-thread", "msg-no-thread")
 }
@@ -645,6 +631,7 @@ func TestFullSyncListEmptyThreadIDRawPresent(t *testing.T) {
 	env.Mock.Profile.MessagesTotal = 1
 	env.Mock.Profile.HistoryID = 12345
 
+	raw := testMIME()
 	env.Mock.ListThreadIDOverride = map[string]string{
 		"msg-list-empty": "",
 	}
@@ -652,15 +639,341 @@ func TestFullSyncListEmptyThreadIDRawPresent(t *testing.T) {
 		ID:           "msg-list-empty",
 		ThreadID:     "actual-thread-from-raw",
 		LabelIDs:     []string{"INBOX"},
-		Raw:          testMIME,
-		SizeEstimate: int64(len(testMIME)),
+		Raw:          raw,
+		SizeEstimate: int64(len(raw)),
 	}
 	env.Mock.MessagePages = [][]string{{"msg-list-empty"}}
 
 	summary := runFullSync(t, env)
-	assertSummary(t, summary, 1, 0, -1, -1)
+	assertSummary(t, summary, WantSummary{Added: intPtr(1), Errors: intPtr(0)})
 
 	assertThreadSourceID(t, env.Store, "msg-list-empty", "actual-thread-from-raw")
+}
+
+// Tests for initSyncState
+
+func TestInitSyncState_NewSync(t *testing.T) {
+	env := newTestEnv(t)
+	source := env.CreateSource(t)
+
+	state, err := env.Syncer.initSyncState(source.ID)
+	if err != nil {
+		t.Fatalf("initSyncState: %v", err)
+	}
+
+	if state.wasResumed {
+		t.Error("expected wasResumed = false for new sync")
+	}
+	if state.pageToken != "" {
+		t.Errorf("expected empty pageToken, got %q", state.pageToken)
+	}
+	if state.syncID == 0 {
+		t.Error("expected non-zero syncID")
+	}
+	if state.checkpoint.MessagesProcessed != 0 {
+		t.Errorf("expected MessagesProcessed = 0, got %d", state.checkpoint.MessagesProcessed)
+	}
+}
+
+func TestInitSyncState_Resume(t *testing.T) {
+	env := newTestEnv(t)
+	source := env.CreateSource(t)
+
+	// Create an active sync with checkpoint
+	syncID, err := env.Store.StartSync(source.ID, "full")
+	if err != nil {
+		t.Fatalf("StartSync: %v", err)
+	}
+	checkpoint := &store.Checkpoint{
+		PageToken:         "resume_token_123",
+		MessagesProcessed: 50,
+		MessagesAdded:     45,
+		MessagesUpdated:   3,
+		ErrorsCount:       2,
+	}
+	if err := env.Store.UpdateSyncCheckpoint(syncID, checkpoint); err != nil {
+		t.Fatalf("UpdateSyncCheckpoint: %v", err)
+	}
+
+	state, err := env.Syncer.initSyncState(source.ID)
+	if err != nil {
+		t.Fatalf("initSyncState: %v", err)
+	}
+
+	if !state.wasResumed {
+		t.Error("expected wasResumed = true")
+	}
+	if state.pageToken != "resume_token_123" {
+		t.Errorf("expected pageToken = 'resume_token_123', got %q", state.pageToken)
+	}
+	if state.syncID != syncID {
+		t.Errorf("expected syncID = %d, got %d", syncID, state.syncID)
+	}
+	if state.checkpoint.MessagesProcessed != 50 {
+		t.Errorf("expected MessagesProcessed = 50, got %d", state.checkpoint.MessagesProcessed)
+	}
+	if state.checkpoint.MessagesAdded != 45 {
+		t.Errorf("expected MessagesAdded = 45, got %d", state.checkpoint.MessagesAdded)
+	}
+}
+
+func TestInitSyncState_NoResumeOption(t *testing.T) {
+	env := newTestEnv(t)
+	env.SetOptions(t, func(o *Options) {
+		o.NoResume = true
+	})
+	source := env.CreateSource(t)
+
+	// Create an active sync with checkpoint
+	syncID, err := env.Store.StartSync(source.ID, "full")
+	if err != nil {
+		t.Fatalf("StartSync: %v", err)
+	}
+	checkpoint := &store.Checkpoint{
+		PageToken:         "resume_token_123",
+		MessagesProcessed: 50,
+	}
+	if err := env.Store.UpdateSyncCheckpoint(syncID, checkpoint); err != nil {
+		t.Fatalf("UpdateSyncCheckpoint: %v", err)
+	}
+
+	state, err := env.Syncer.initSyncState(source.ID)
+	if err != nil {
+		t.Fatalf("initSyncState: %v", err)
+	}
+
+	if state.wasResumed {
+		t.Error("expected wasResumed = false with NoResume option")
+	}
+	if state.pageToken != "" {
+		t.Errorf("expected empty pageToken with NoResume, got %q", state.pageToken)
+	}
+	if state.syncID == syncID {
+		t.Error("expected new syncID, not the existing one")
+	}
+}
+
+// Tests for processBatch
+
+func TestProcessBatch_EmptyBatch(t *testing.T) {
+	env := newTestEnv(t)
+	source := env.CreateSource(t)
+	labelMap := make(map[string]int64)
+	checkpoint := &store.Checkpoint{}
+	summary := &gmail.SyncSummary{}
+
+	listResp := &gmail.MessageListResponse{
+		Messages: nil,
+	}
+
+	result, err := env.Syncer.processBatch(env.Context, source.ID, listResp, labelMap, checkpoint, summary)
+	if err != nil {
+		t.Fatalf("processBatch: %v", err)
+	}
+
+	if result.processed != 0 {
+		t.Errorf("expected processed = 0, got %d", result.processed)
+	}
+	if result.added != 0 {
+		t.Errorf("expected added = 0, got %d", result.added)
+	}
+	if result.skipped != 0 {
+		t.Errorf("expected skipped = 0, got %d", result.skipped)
+	}
+}
+
+func TestProcessBatch_AllNew(t *testing.T) {
+	env := newTestEnv(t)
+	source := env.CreateSource(t)
+	labelMap, _ := env.Store.EnsureLabelsBatch(source.ID, map[string]store.LabelInfo{
+		"INBOX": {Name: "Inbox", Type: "system"},
+	})
+	checkpoint := &store.Checkpoint{}
+	summary := &gmail.SyncSummary{}
+
+	env.Mock.AddMessage("msg1", testMIME(), []string{"INBOX"})
+	env.Mock.AddMessage("msg2", testMIME(), []string{"INBOX"})
+
+	listResp := &gmail.MessageListResponse{
+		Messages: []gmail.MessageID{
+			{ID: "msg1", ThreadID: "thread1"},
+			{ID: "msg2", ThreadID: "thread2"},
+		},
+	}
+
+	result, err := env.Syncer.processBatch(env.Context, source.ID, listResp, labelMap, checkpoint, summary)
+	if err != nil {
+		t.Fatalf("processBatch: %v", err)
+	}
+
+	if result.processed != 2 {
+		t.Errorf("expected processed = 2, got %d", result.processed)
+	}
+	if result.added != 2 {
+		t.Errorf("expected added = 2, got %d", result.added)
+	}
+	if result.skipped != 0 {
+		t.Errorf("expected skipped = 0, got %d", result.skipped)
+	}
+}
+
+func TestProcessBatch_AllExisting(t *testing.T) {
+	env := newTestEnv(t)
+	seedMessages(env, 2, 12345, "msg1", "msg2")
+
+	// First sync to add messages
+	runFullSync(t, env)
+
+	source, _ := env.Store.GetOrCreateSource("gmail", testEmail)
+	labelMap, _ := env.Store.EnsureLabelsBatch(source.ID, map[string]store.LabelInfo{
+		"INBOX": {Name: "Inbox", Type: "system"},
+	})
+	checkpoint := &store.Checkpoint{}
+	summary := &gmail.SyncSummary{}
+
+	listResp := &gmail.MessageListResponse{
+		Messages: []gmail.MessageID{
+			{ID: "msg1", ThreadID: "thread1"},
+			{ID: "msg2", ThreadID: "thread2"},
+		},
+	}
+
+	result, err := env.Syncer.processBatch(env.Context, source.ID, listResp, labelMap, checkpoint, summary)
+	if err != nil {
+		t.Fatalf("processBatch: %v", err)
+	}
+
+	if result.processed != 2 {
+		t.Errorf("expected processed = 2, got %d", result.processed)
+	}
+	if result.added != 0 {
+		t.Errorf("expected added = 0 (all existing), got %d", result.added)
+	}
+	if result.skipped != 2 {
+		t.Errorf("expected skipped = 2, got %d", result.skipped)
+	}
+}
+
+func TestProcessBatch_MixedNewAndExisting(t *testing.T) {
+	env := newTestEnv(t)
+	seedMessages(env, 1, 12345, "msg1")
+
+	// First sync to add msg1
+	runFullSync(t, env)
+
+	source, _ := env.Store.GetOrCreateSource("gmail", testEmail)
+	labelMap, _ := env.Store.EnsureLabelsBatch(source.ID, map[string]store.LabelInfo{
+		"INBOX": {Name: "Inbox", Type: "system"},
+	})
+	checkpoint := &store.Checkpoint{}
+	summary := &gmail.SyncSummary{}
+
+	// Add msg2 to mock
+	env.Mock.AddMessage("msg2", testMIME(), []string{"INBOX"})
+
+	listResp := &gmail.MessageListResponse{
+		Messages: []gmail.MessageID{
+			{ID: "msg1", ThreadID: "thread1"},
+			{ID: "msg2", ThreadID: "thread2"},
+		},
+	}
+
+	result, err := env.Syncer.processBatch(env.Context, source.ID, listResp, labelMap, checkpoint, summary)
+	if err != nil {
+		t.Fatalf("processBatch: %v", err)
+	}
+
+	if result.processed != 2 {
+		t.Errorf("expected processed = 2, got %d", result.processed)
+	}
+	if result.added != 1 {
+		t.Errorf("expected added = 1, got %d", result.added)
+	}
+	if result.skipped != 1 {
+		t.Errorf("expected skipped = 1, got %d", result.skipped)
+	}
+}
+
+func TestProcessBatch_OldestDatePropagation(t *testing.T) {
+	env := newTestEnv(t)
+	source := env.CreateSource(t)
+	labelMap, _ := env.Store.EnsureLabelsBatch(source.ID, map[string]store.LabelInfo{
+		"INBOX": {Name: "Inbox", Type: "system"},
+	})
+	checkpoint := &store.Checkpoint{}
+	summary := &gmail.SyncSummary{}
+
+	// Add messages with specific internal dates
+	// msg1: Jan 15, 2024, msg2: Jan 10, 2024 (older)
+	env.Mock.Messages["msg1"] = &gmail.RawMessage{
+		ID:           "msg1",
+		ThreadID:     "thread1",
+		LabelIDs:     []string{"INBOX"},
+		Raw:          testMIME(),
+		InternalDate: 1705320000000, // 2024-01-15T12:00:00Z
+	}
+	env.Mock.Messages["msg2"] = &gmail.RawMessage{
+		ID:           "msg2",
+		ThreadID:     "thread2",
+		LabelIDs:     []string{"INBOX"},
+		Raw:          testMIME(),
+		InternalDate: 1704888000000, // 2024-01-10T12:00:00Z
+	}
+
+	listResp := &gmail.MessageListResponse{
+		Messages: []gmail.MessageID{
+			{ID: "msg1", ThreadID: "thread1"},
+			{ID: "msg2", ThreadID: "thread2"},
+		},
+	}
+
+	result, err := env.Syncer.processBatch(env.Context, source.ID, listResp, labelMap, checkpoint, summary)
+	if err != nil {
+		t.Fatalf("processBatch: %v", err)
+	}
+
+	// oldestDate should be Jan 10, 2024
+	if result.oldestDate.IsZero() {
+		t.Error("expected oldestDate to be set")
+	}
+	expectedYear, expectedMonth, expectedDay := 2024, 1, 10
+	gotYear, gotMonth, gotDay := result.oldestDate.Year(), int(result.oldestDate.Month()), result.oldestDate.Day()
+	if gotYear != expectedYear || gotMonth != expectedMonth || gotDay != expectedDay {
+		t.Errorf("expected oldestDate = 2024-01-10, got %d-%02d-%02d", gotYear, gotMonth, gotDay)
+	}
+}
+
+func TestProcessBatch_ErrorsCount(t *testing.T) {
+	env := newTestEnv(t)
+	source := env.CreateSource(t)
+	labelMap, _ := env.Store.EnsureLabelsBatch(source.ID, map[string]store.LabelInfo{
+		"INBOX": {Name: "Inbox", Type: "system"},
+	})
+	checkpoint := &store.Checkpoint{}
+	summary := &gmail.SyncSummary{}
+
+	env.Mock.AddMessage("msg1", testMIME(), []string{"INBOX"})
+	// msg2 will return nil (simulating fetch failure)
+	env.Mock.GetMessageError["msg2"] = &gmail.NotFoundError{Path: "/messages/msg2"}
+
+	listResp := &gmail.MessageListResponse{
+		Messages: []gmail.MessageID{
+			{ID: "msg1", ThreadID: "thread1"},
+			{ID: "msg2", ThreadID: "thread2"},
+		},
+	}
+
+	result, err := env.Syncer.processBatch(env.Context, source.ID, listResp, labelMap, checkpoint, summary)
+	if err != nil {
+		t.Fatalf("processBatch: %v", err)
+	}
+
+	if result.added != 1 {
+		t.Errorf("expected added = 1, got %d", result.added)
+	}
+	if checkpoint.ErrorsCount != 1 {
+		t.Errorf("expected ErrorsCount = 1, got %d", checkpoint.ErrorsCount)
+	}
 }
 
 // TestAttachmentFilePermissions verifies that attachment files are saved with
@@ -669,7 +982,7 @@ func TestAttachmentFilePermissions(t *testing.T) {
 	env := newTestEnv(t)
 	env.Mock.Profile.MessagesTotal = 1
 	env.Mock.Profile.HistoryID = 12345
-	env.Mock.AddMessage("msg-with-attachment", testMIMEWithAttachment, []string{"INBOX"})
+	env.Mock.AddMessage("msg-with-attachment", testMIMEWithAttachment(), []string{"INBOX"})
 
 	attachDir := withAttachmentsDir(t, env)
 

@@ -42,22 +42,32 @@ func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
+// MockConfig holds configuration for creating a mock engine in tests.
+// Using a struct instead of positional arguments makes tests more readable
+// and easier to extend as the engine interface evolves.
+type MockConfig struct {
+	Rows     []query.AggregateRow
+	Messages []query.MessageSummary
+	Detail   *query.MessageDetail
+	GmailIDs []string
+}
+
 // newMockEngine creates a querytest.MockEngine configured for TUI testing.
 // The messages slice is returned from ListMessages, Search, SearchFast, and
 // SearchFastCount, matching the legacy mockEngine behavior.
-func newMockEngine(rows []query.AggregateRow, messages []query.MessageSummary, detail *query.MessageDetail, gmailIDs []string) *querytest.MockEngine {
+func newMockEngine(cfg MockConfig) *querytest.MockEngine {
 	eng := &querytest.MockEngine{
-		AggregateRows:     rows,
-		ListResults:       messages,
-		SearchResults:     messages,
-		SearchFastResults: messages,
-		GmailIDs:          gmailIDs,
+		AggregateRows:     cfg.Rows,
+		ListResults:       cfg.Messages,
+		SearchResults:     cfg.Messages,
+		SearchFastResults: cfg.Messages,
+		GmailIDs:          cfg.GmailIDs,
 	}
 	eng.GetMessageFunc = func(_ context.Context, _ int64) (*query.MessageDetail, error) {
-		return detail, nil
+		return cfg.Detail, nil
 	}
 	eng.SearchFastCountFunc = func(_ context.Context, _ *search.Query, _ query.MessageFilter) (int64, error) {
-		return int64(len(messages)), nil
+		return int64(len(cfg.Messages)), nil
 	}
 	return eng
 }
@@ -68,26 +78,28 @@ func newMockEngine(rows []query.AggregateRow, messages []query.MessageSummary, d
 
 // TestModelBuilder helps construct Model instances for testing
 type TestModelBuilder struct {
-	rows              []query.AggregateRow
-	messages          []query.MessageSummary
-	messageDetail     *query.MessageDetail
-	gmailIDs          []string
-	accounts          []query.AccountInfo
-	width             int
-	height            int
-	pageSize          int  // explicit override; 0 means auto-calculate from height
-	rawPageSize       bool // when true, pageSize is set without clamping
-	viewType          query.ViewType
-	level             viewLevel
-	dataDir           string
-	version           string
-	loading           *bool // nil = auto (false if data provided), non-nil = explicit
-	modal             *modalType
-	accountFilter     *int64
-	stats             *query.TotalStats
-	contextStats      *query.TotalStats
-	activeSearchQuery string
-	activeSearchMode  *searchModeKind
+	rows               []query.AggregateRow
+	messages           []query.MessageSummary
+	messageDetail      *query.MessageDetail
+	gmailIDs           []string
+	accounts           []query.AccountInfo
+	width              int
+	height             int
+	pageSize           int  // explicit override; 0 means auto-calculate from height
+	rawPageSize        bool // when true, pageSize is set without clamping
+	viewType           query.ViewType
+	viewTypeSet        bool // tracks whether viewType was explicitly set (fixes ViewSenders iota 0 collision)
+	level              viewLevel
+	dataDir            string
+	version            string
+	loading            *bool // nil = auto (false if data provided), non-nil = explicit
+	modal              *modalType
+	accountFilter      *int64
+	stats              *query.TotalStats
+	contextStats       *query.TotalStats
+	activeSearchQuery  string
+	activeSearchMode   *searchModeKind
+	selectedAggregates *selectedAggregates
 }
 
 func NewBuilder() *TestModelBuilder {
@@ -143,6 +155,7 @@ func (b *TestModelBuilder) WithLevel(level viewLevel) *TestModelBuilder {
 
 func (b *TestModelBuilder) WithViewType(vt query.ViewType) *TestModelBuilder {
 	b.viewType = vt
+	b.viewTypeSet = true
 	return b
 }
 
@@ -174,6 +187,34 @@ func (b *TestModelBuilder) WithAccountFilter(id *int64) *TestModelBuilder {
 	return b
 }
 
+// selectedAggregates holds the aggregate selection state for the builder.
+type selectedAggregates struct {
+	keys        []string
+	viewType    query.ViewType
+	viewTypeSet bool // tracks whether viewType was explicitly set
+}
+
+// WithSelectedAggregates pre-populates aggregate selection with the given keys.
+// The viewType is inferred from the builder's viewType setting.
+func (b *TestModelBuilder) WithSelectedAggregates(keys ...string) *TestModelBuilder {
+	if b.selectedAggregates == nil {
+		b.selectedAggregates = &selectedAggregates{}
+	}
+	b.selectedAggregates.keys = keys
+	return b
+}
+
+// WithSelectedAggregatesViewType sets the viewType for aggregate selection.
+// Use this when the selection viewType differs from the model's viewType.
+func (b *TestModelBuilder) WithSelectedAggregatesViewType(vt query.ViewType) *TestModelBuilder {
+	if b.selectedAggregates == nil {
+		b.selectedAggregates = &selectedAggregates{}
+	}
+	b.selectedAggregates.viewType = vt
+	b.selectedAggregates.viewTypeSet = true
+	return b
+}
+
 func (b *TestModelBuilder) WithStats(stats *query.TotalStats) *TestModelBuilder {
 	b.stats = stats
 	return b
@@ -185,75 +226,110 @@ func (b *TestModelBuilder) WithContextStats(stats *query.TotalStats) *TestModelB
 }
 
 func (b *TestModelBuilder) Build() Model {
-	engine := newMockEngine(b.rows, b.messages, b.messageDetail, b.gmailIDs)
+	engine := newMockEngine(MockConfig{
+		Rows:     b.rows,
+		Messages: b.messages,
+		Detail:   b.messageDetail,
+		GmailIDs: b.gmailIDs,
+	})
 
 	model := New(engine, Options{DataDir: b.dataDir, Version: b.version})
-	model.width = b.width
-	model.height = b.height
-	if b.rawPageSize {
-		model.pageSize = b.pageSize
-	} else if b.pageSize > 0 {
-		model.pageSize = b.pageSize
-	} else {
-		model.pageSize = b.height - 5
-		if model.pageSize < 1 {
-			model.pageSize = 1
-		}
-	}
 
-	// Pre-populate data if provided
+	b.configureDimensions(&model)
+	b.configureData(&model)
+	b.configureState(&model)
+
+	return model
+}
+
+// calculatePageSize determines the page size based on builder configuration.
+func (b *TestModelBuilder) calculatePageSize() int {
+	if b.rawPageSize {
+		return b.pageSize
+	}
+	if b.pageSize > 0 {
+		return b.pageSize
+	}
+	size := b.height - 5
+	if size < 1 {
+		return 1
+	}
+	return size
+}
+
+// configureDimensions sets width, height, and pageSize on the model.
+func (b *TestModelBuilder) configureDimensions(m *Model) {
+	m.width = b.width
+	m.height = b.height
+	m.pageSize = b.calculatePageSize()
+}
+
+// configureData pre-populates the model with test data (rows, messages, detail).
+func (b *TestModelBuilder) configureData(m *Model) {
 	if len(b.rows) > 0 {
-		model.rows = b.rows
+		m.rows = b.rows
 	}
 	if len(b.messages) > 0 {
-		model.messages = b.messages
+		m.messages = b.messages
 	}
 	if b.messageDetail != nil {
-		model.messageDetail = b.messageDetail
+		m.messageDetail = b.messageDetail
 	}
+}
 
+// configureState applies loading, level, viewType, accounts, modal, filters, and selection.
+func (b *TestModelBuilder) configureState(m *Model) {
 	// Loading: explicit if set, otherwise false only when data is provided
 	if b.loading != nil {
-		model.loading = *b.loading
+		m.loading = *b.loading
 	} else if len(b.rows) > 0 || len(b.messages) > 0 || b.messageDetail != nil {
-		model.loading = false
+		m.loading = false
 	}
 
 	if b.level != levelAggregates {
-		model.level = b.level
+		m.level = b.level
 	}
 
-	if b.viewType != 0 {
-		model.viewType = b.viewType
+	if b.viewTypeSet {
+		m.viewType = b.viewType
 	}
 
 	if len(b.accounts) > 0 {
-		model.accounts = b.accounts
+		m.accounts = b.accounts
 	}
 
 	if b.modal != nil {
-		model.modal = *b.modal
+		m.modal = *b.modal
 	}
 
 	if b.accountFilter != nil {
-		model.accountFilter = b.accountFilter
+		m.accountFilter = b.accountFilter
 	}
 
 	if b.stats != nil {
-		model.stats = b.stats
+		m.stats = b.stats
 	}
 
 	if b.contextStats != nil {
-		model.contextStats = b.contextStats
+		m.contextStats = b.contextStats
 	}
 
 	if b.activeSearchMode != nil {
-		model.inlineSearchActive = true
-		model.searchMode = *b.activeSearchMode
-		model.searchInput.SetValue(b.activeSearchQuery)
+		m.inlineSearchActive = true
+		m.searchMode = *b.activeSearchMode
+		m.searchInput.SetValue(b.activeSearchQuery)
 	}
 
-	return model
+	if b.selectedAggregates != nil {
+		for _, k := range b.selectedAggregates.keys {
+			m.selection.aggregateKeys[k] = true
+		}
+		if b.selectedAggregates.viewTypeSet {
+			m.selection.aggregateViewType = b.selectedAggregates.viewType
+		} else {
+			m.selection.aggregateViewType = m.viewType
+		}
+	}
 }
 
 // sendKey sends a key message to the model and returns the updated concrete Model.
@@ -275,6 +351,76 @@ func assertModal(t *testing.T, m Model, expected modalType) {
 	t.Helper()
 	if m.modal != expected {
 		t.Errorf("expected modal %v, got %v", expected, m.modal)
+	}
+}
+
+// assertModalCleared checks that the modal is dismissed and modalResult is empty.
+func assertModalCleared(t *testing.T, m Model) {
+	t.Helper()
+	if m.modal != modalNone {
+		t.Errorf("expected modalNone, got %v", m.modal)
+	}
+	if m.modalResult != "" {
+		t.Errorf("expected empty modalResult, got %q", m.modalResult)
+	}
+}
+
+// assertPendingManifestCleared checks that pendingManifest is nil.
+func assertPendingManifestCleared(t *testing.T, m Model) {
+	t.Helper()
+	if m.pendingManifest != nil {
+		t.Error("expected pendingManifest to be nil")
+	}
+}
+
+// assertPendingManifestGmailIDs checks that pendingManifest has the expected number of Gmail IDs.
+func assertPendingManifestGmailIDs(t *testing.T, m Model, expectedCount int) {
+	t.Helper()
+	if m.pendingManifest == nil {
+		t.Fatal("expected pendingManifest to be set")
+	}
+	if len(m.pendingManifest.GmailIDs) != expectedCount {
+		t.Errorf("expected %d Gmail IDs, got %d", expectedCount, len(m.pendingManifest.GmailIDs))
+	}
+}
+
+// assertSelectionViewTypeMatches checks that aggregateViewType matches the model's viewType.
+func assertSelectionViewTypeMatches(t *testing.T, m Model) {
+	t.Helper()
+	if m.selection.aggregateViewType != m.viewType {
+		t.Errorf("expected aggregateViewType %v to match viewType %v", m.selection.aggregateViewType, m.viewType)
+	}
+}
+
+// assertHasSelection checks that the model has at least one selection.
+func assertHasSelection(t *testing.T, m Model, expected bool) {
+	t.Helper()
+	if m.hasSelection() != expected {
+		t.Errorf("expected hasSelection()=%v, got %v", expected, m.hasSelection())
+	}
+}
+
+// assertMessageSelected checks that a specific message ID is selected.
+func assertMessageSelected(t *testing.T, m Model, id int64) {
+	t.Helper()
+	if !m.selection.messageIDs[id] {
+		t.Errorf("expected message ID %d to be selected", id)
+	}
+}
+
+// assertFilterKey checks the model's filterKey field.
+func assertFilterKey(t *testing.T, m Model, expected string) {
+	t.Helper()
+	if m.filterKey != expected {
+		t.Errorf("expected filterKey=%q, got %q", expected, m.filterKey)
+	}
+}
+
+// assertBreadcrumbCount checks the number of breadcrumbs.
+func assertBreadcrumbCount(t *testing.T, m Model, expected int) {
+	t.Helper()
+	if len(m.breadcrumbs) != expected {
+		t.Errorf("expected %d breadcrumbs, got %d", expected, len(m.breadcrumbs))
 	}
 }
 
@@ -314,30 +460,23 @@ func standardStats() *query.TotalStats {
 	return &query.TotalStats{MessageCount: 1000, TotalSize: 5000000, AttachmentCount: 50}
 }
 
-// newTestModel creates a Model with common test defaults.
-// The returned model has standard width/height and is ready for testing.
-func newTestModel(engine *querytest.MockEngine) Model {
-	model := New(engine, Options{DataDir: "/tmp/test", Version: "test123"})
-	model.width = 100
-	model.height = 24
-	model.pageSize = 10
-	return model
-}
-
 // newTestModelWithRows creates a test model pre-populated with aggregate rows.
+// The model is returned with loading=false since data is present.
+// Use NewBuilder().WithRows(...).WithLoading(true) if you need loading=true.
 func newTestModelWithRows(rows []query.AggregateRow) Model {
-	engine := newMockEngine(rows, nil, nil, nil)
-	model := newTestModel(engine)
-	model.rows = rows
-	return model
+	return NewBuilder().
+		WithRows(rows...).
+		WithPageSize(10).
+		Build()
 }
 
 // newTestModelAtLevel creates a test model at the specified navigation level.
+// This helper uses the TestModelBuilder internally for consistency.
 func newTestModelAtLevel(level viewLevel) Model {
-	engine := newMockEngine(nil, nil, nil, nil)
-	model := newTestModel(engine)
-	model.level = level
-	return model
+	return NewBuilder().
+		WithLevel(level).
+		WithPageSize(10).
+		Build()
 }
 
 // withSearchQuery sets a search query on the model.
@@ -511,11 +650,25 @@ func applyAggregateKey(t *testing.T, m Model, k tea.KeyMsg) Model {
 	return newModel.(Model)
 }
 
+// applyAggregateKeyWithCmd sends a key through handleAggregateKeys and returns Model and Cmd.
+func applyAggregateKeyWithCmd(t *testing.T, m Model, k tea.KeyMsg) (Model, tea.Cmd) {
+	t.Helper()
+	newModel, cmd := m.handleAggregateKeys(k)
+	return newModel.(Model), cmd
+}
+
 // applyMessageListKey sends a key through handleMessageListKeys and returns the concrete Model.
 func applyMessageListKey(t *testing.T, m Model, k tea.KeyMsg) Model {
 	t.Helper()
 	newModel, _ := m.handleMessageListKeys(k)
 	return newModel.(Model)
+}
+
+// applyMessageListKeyWithCmd sends a key through handleMessageListKeys and returns Model and Cmd.
+func applyMessageListKeyWithCmd(t *testing.T, m Model, k tea.KeyMsg) (Model, tea.Cmd) {
+	t.Helper()
+	newModel, cmd := m.handleMessageListKeys(k)
+	return newModel.(Model), cmd
 }
 
 // applyModalKey sends a key through handleModalKeys and returns the concrete Model and Cmd.
@@ -560,35 +713,6 @@ func resizeModel(t *testing.T, m Model, w, h int) Model {
 	t.Helper()
 	newModel, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	return newModel.(Model)
-}
-
-// assertHeaderLine splits the header into lines, checks the line count is sufficient,
-// and asserts that the specified line contains all of the given substrings.
-func assertHeaderLine(t *testing.T, model Model, lineIdx int, wantSubstrings ...string) {
-	t.Helper()
-	header := model.headerView()
-	lines := strings.Split(header, "\n")
-	if lineIdx >= len(lines) {
-		t.Fatalf("header has %d lines, want line %d", len(lines), lineIdx)
-	}
-	for _, want := range wantSubstrings {
-		if !strings.Contains(lines[lineIdx], want) {
-			t.Errorf("header line %d missing %q: %q", lineIdx, want, lines[lineIdx])
-		}
-	}
-}
-
-// assertHeaderLineNot asserts that the specified header line does NOT contain the given substring.
-func assertHeaderLineNot(t *testing.T, model Model, lineIdx int, notWant string) {
-	t.Helper()
-	header := model.headerView()
-	lines := strings.Split(header, "\n")
-	if lineIdx >= len(lines) {
-		t.Fatalf("header has %d lines, want line %d", len(lines), lineIdx)
-	}
-	if strings.Contains(lines[lineIdx], notWant) {
-		t.Errorf("header line %d should not contain %q: %q", lineIdx, notWant, lines[lineIdx])
-	}
 }
 
 // assertState checks level, viewType, and cursor in one call.
@@ -663,6 +787,59 @@ func assertContextStats(t *testing.T, m Model, wantCount int, wantSize int64, wa
 	if wantAttach != -1 && m.contextStats.AttachmentCount != int64(wantAttach) {
 		t.Errorf("got AttachmentCount=%d, want %d", m.contextStats.AttachmentCount, wantAttach)
 	}
+}
+
+// assertSearchMode checks the model's searchMode field.
+func assertSearchMode(t *testing.T, m Model, expected searchModeKind) {
+	t.Helper()
+	if m.searchMode != expected {
+		t.Errorf("expected searchMode %v, got %v", expected, m.searchMode)
+	}
+}
+
+// assertLoading checks the model's loading state fields.
+func assertLoading(t *testing.T, m Model, loading, inlineSearchLoading bool) {
+	t.Helper()
+	if m.loading != loading {
+		t.Errorf("expected loading=%v, got %v", loading, m.loading)
+	}
+	if m.inlineSearchLoading != inlineSearchLoading {
+		t.Errorf("expected inlineSearchLoading=%v, got %v", inlineSearchLoading, m.inlineSearchLoading)
+	}
+}
+
+// assertCmd checks whether a command is nil or non-nil as expected.
+func assertCmd(t *testing.T, cmd tea.Cmd, wantCmd bool) {
+	t.Helper()
+	if wantCmd && cmd == nil {
+		t.Error("expected command to be returned")
+	}
+	if !wantCmd && cmd != nil {
+		t.Error("expected no command")
+	}
+}
+
+// assertSearchQuery checks the model's searchQuery field.
+func assertSearchQuery(t *testing.T, m Model, expected string) {
+	t.Helper()
+	if m.searchQuery != expected {
+		t.Errorf("expected searchQuery=%q, got %q", expected, m.searchQuery)
+	}
+}
+
+// assertInlineSearchActive checks the model's inlineSearchActive field.
+func assertInlineSearchActive(t *testing.T, m Model, expected bool) {
+	t.Helper()
+	if m.inlineSearchActive != expected {
+		t.Errorf("expected inlineSearchActive=%v, got %v", expected, m.inlineSearchActive)
+	}
+}
+
+// applyInlineSearchKey sends a key through handleInlineSearchKeys and returns Model and Cmd.
+func applyInlineSearchKey(t *testing.T, m Model, k tea.KeyMsg) (Model, tea.Cmd) {
+	t.Helper()
+	newModel, cmd := m.handleInlineSearchKeys(k)
+	return newModel.(Model), cmd
 }
 
 // =============================================================================

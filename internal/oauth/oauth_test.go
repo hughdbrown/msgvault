@@ -2,12 +2,71 @@ package oauth
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 )
+
+func setupTestManager(t *testing.T, scopes []string) *Manager {
+	t.Helper()
+	dir := t.TempDir()
+	tokensDir := filepath.Join(dir, "tokens")
+	if err := os.MkdirAll(tokensDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return &Manager{
+		config:    &oauth2.Config{Scopes: scopes},
+		tokensDir: tokensDir,
+	}
+}
+
+func writeTokenFile(t *testing.T, mgr *Manager, email string, token oauth2.Token, scopes []string) {
+	t.Helper()
+	tf := tokenFile{
+		Token:  token,
+		Scopes: scopes,
+	}
+	data, err := json.Marshal(tf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mgr.tokensDir, email+".json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeLegacyTokenFile(t *testing.T, mgr *Manager, email string, token oauth2.Token) {
+	t.Helper()
+	data, err := json.Marshal(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mgr.tokensDir, email+".json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+var testToken = oauth2.Token{AccessToken: "test", TokenType: "Bearer"}
+
+// assertNoSend is a test helper to assert that a channel remains empty.
+// Uses a 100ms timeout to balance between flakiness on slow CI and detection
+// of late asynchronous sends.
+func assertNoSend[T any](t *testing.T, ch <-chan T, chanName string) {
+	t.Helper()
+	const noSendTimeout = 100 * time.Millisecond
+	select {
+	case v := <-ch:
+		t.Errorf("unexpected value on %s: %v", chanName, v)
+	case <-time.After(noSendTimeout):
+		// expected: no value arrived
+	}
+}
 
 func TestScopesToString(t *testing.T) {
 	tests := []struct {
@@ -48,29 +107,12 @@ func TestScopesToString(t *testing.T) {
 }
 
 func TestHasScope(t *testing.T) {
-	dir := t.TempDir()
-	tokensDir := filepath.Join(dir, "tokens")
-	if err := os.MkdirAll(tokensDir, 0700); err != nil {
-		t.Fatal(err)
-	}
+	mgr := setupTestManager(t, Scopes)
 
-	mgr := &Manager{
-		config:    &oauth2.Config{Scopes: Scopes},
-		tokensDir: tokensDir,
-	}
-
-	// Write a token file with scopes
-	tf := tokenFile{
-		Token:  oauth2.Token{AccessToken: "test", TokenType: "Bearer"},
-		Scopes: []string{"https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"},
-	}
-	data, err := json.Marshal(tf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tokensDir, "test@gmail.com.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeTokenFile(t, mgr, "test@gmail.com", testToken, []string{
+		"https://www.googleapis.com/auth/gmail.readonly",
+		"https://www.googleapis.com/auth/gmail.modify",
+	})
 
 	// Has a scope that was saved
 	if !mgr.HasScope("test@gmail.com", "https://www.googleapis.com/auth/gmail.readonly") {
@@ -89,13 +131,7 @@ func TestHasScope(t *testing.T) {
 }
 
 func TestTokenFileScopesRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	tokensDir := filepath.Join(dir, "tokens")
-
-	mgr := &Manager{
-		config:    &oauth2.Config{Scopes: ScopesDeletion},
-		tokensDir: tokensDir,
-	}
+	mgr := setupTestManager(t, ScopesDeletion)
 
 	token := &oauth2.Token{
 		AccessToken:  "access",
@@ -128,83 +164,150 @@ func TestTokenFileScopesRoundTrip(t *testing.T) {
 }
 
 func TestHasScope_LegacyToken(t *testing.T) {
-	dir := t.TempDir()
-	tokensDir := filepath.Join(dir, "tokens")
-	if err := os.MkdirAll(tokensDir, 0700); err != nil {
-		t.Fatal(err)
-	}
+	mgr := setupTestManager(t, Scopes)
 
-	mgr := &Manager{
-		config:    &oauth2.Config{Scopes: Scopes},
-		tokensDir: tokensDir,
-	}
+	writeLegacyTokenFile(t, mgr, "legacy@gmail.com", testToken)
 
-	// Write a legacy token (no scopes field)
-	token := oauth2.Token{AccessToken: "test", TokenType: "Bearer"}
-	data, err := json.Marshal(token)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tokensDir, "legacy@gmail.com.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Legacy token has no scopes — HasScope returns false
 	if mgr.HasScope("legacy@gmail.com", "https://www.googleapis.com/auth/gmail.readonly") {
 		t.Error("expected HasScope to return false for legacy token")
 	}
 }
 
 func TestHasScopeMetadata(t *testing.T) {
-	dir := t.TempDir()
-	tokensDir := filepath.Join(dir, "tokens")
-	if err := os.MkdirAll(tokensDir, 0700); err != nil {
+	mgr := setupTestManager(t, Scopes)
+
+	writeTokenFile(t, mgr, "scoped@gmail.com", testToken, []string{
+		"https://www.googleapis.com/auth/gmail.readonly",
+	})
+	writeLegacyTokenFile(t, mgr, "legacy@gmail.com", testToken)
+	if err := os.WriteFile(filepath.Join(mgr.tokensDir, "corrupt@gmail.com.json"), []byte("not json"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	mgr := &Manager{
-		config:    &oauth2.Config{Scopes: Scopes},
-		tokensDir: tokensDir,
+	tests := []struct {
+		name  string
+		email string
+		want  bool
+	}{
+		{"valid scoped token", "scoped@gmail.com", true},
+		{"legacy token", "legacy@gmail.com", false},
+		{"missing token", "missing@gmail.com", false},
+		{"corrupt token file", "corrupt@gmail.com", false},
 	}
 
-	// Token with scopes
-	tf := tokenFile{
-		Token:  oauth2.Token{AccessToken: "test", TokenType: "Bearer"},
-		Scopes: []string{"https://www.googleapis.com/auth/gmail.readonly"},
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mgr.HasScopeMetadata(tt.email)
+			if got != tt.want {
+				t.Errorf("HasScopeMetadata(%q) = %v, want %v", tt.email, got, tt.want)
+			}
+		})
 	}
-	data, err := json.Marshal(tf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tokensDir, "scoped@gmail.com.json"), data, 0600); err != nil {
-		t.Fatal(err)
+}
+
+func TestNewCallbackHandler(t *testing.T) {
+	mgr := setupTestManager(t, Scopes)
+
+	tests := []struct {
+		name             string
+		queryState       string
+		expectedState    string
+		queryCode        string
+		wantStatusCode   int
+		wantBodyContains string
+		wantCode         string
+		wantErr          string
+	}{
+		{
+			name:             "success",
+			queryState:       "valid-state",
+			expectedState:    "valid-state",
+			queryCode:        "auth-code-123",
+			wantStatusCode:   http.StatusOK,
+			wantBodyContains: "Authorization successful",
+			wantCode:         "auth-code-123",
+		},
+		{
+			name:             "state mismatch",
+			queryState:       "wrong-state",
+			expectedState:    "expected-state",
+			queryCode:        "auth-code-123",
+			wantStatusCode:   http.StatusOK,
+			wantBodyContains: "state mismatch",
+			wantErr:          "state mismatch: possible CSRF attack",
+		},
+		{
+			name:             "missing code",
+			queryState:       "valid-state",
+			expectedState:    "valid-state",
+			queryCode:        "",
+			wantStatusCode:   http.StatusOK,
+			wantBodyContains: "no authorization code",
+			wantErr:          "no code in callback",
+		},
+		{
+			name:             "empty state",
+			queryState:       "",
+			expectedState:    "expected-state",
+			queryCode:        "auth-code-123",
+			wantStatusCode:   http.StatusOK,
+			wantBodyContains: "state mismatch",
+			wantErr:          "state mismatch: possible CSRF attack",
+		},
 	}
 
-	// Legacy token (no scopes)
-	legacy := oauth2.Token{AccessToken: "test", TokenType: "Bearer"}
-	data, err = json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tokensDir, "legacy@gmail.com.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			codeChan := make(chan string, 1)
+			errChan := make(chan error, 1)
 
-	// Corrupt token file
-	if err := os.WriteFile(filepath.Join(tokensDir, "corrupt@gmail.com.json"), []byte("not json"), 0600); err != nil {
-		t.Fatal(err)
-	}
+			handler := mgr.newCallbackHandler(tt.expectedState, codeChan, errChan)
 
-	if !mgr.HasScopeMetadata("scoped@gmail.com") {
-		t.Error("expected HasScopeMetadata true for token with scopes")
-	}
-	if mgr.HasScopeMetadata("legacy@gmail.com") {
-		t.Error("expected HasScopeMetadata false for legacy token")
-	}
-	if mgr.HasScopeMetadata("missing@gmail.com") {
-		t.Error("expected HasScopeMetadata false for missing token")
-	}
-	if mgr.HasScopeMetadata("corrupt@gmail.com") {
-		t.Error("expected HasScopeMetadata false for corrupt token file")
+			url := "/callback?state=" + tt.queryState
+			if tt.queryCode != "" {
+				url += "&code=" + tt.queryCode
+			}
+			req := httptest.NewRequest(http.MethodGet, url, nil)
+			rec := httptest.NewRecorder()
+
+			handler(rec, req)
+
+			if rec.Code != tt.wantStatusCode {
+				t.Errorf("status code = %d, want %d", rec.Code, tt.wantStatusCode)
+			}
+
+			body := rec.Body.String()
+			if tt.wantBodyContains != "" && !strings.Contains(body, tt.wantBodyContains) {
+				t.Errorf("body = %q, want to contain %q", body, tt.wantBodyContains)
+			}
+
+			// Check for expected code on success
+			if tt.wantCode != "" {
+				select {
+				case code := <-codeChan:
+					if code != tt.wantCode {
+						t.Errorf("code = %q, want %q", code, tt.wantCode)
+					}
+				default:
+					t.Error("expected code on codeChan, got nothing")
+				}
+			} else {
+				assertNoSend(t, codeChan, "codeChan")
+			}
+
+			// Check for expected error
+			if tt.wantErr != "" {
+				select {
+				case err := <-errChan:
+					if err.Error() != tt.wantErr {
+						t.Errorf("error = %q, want %q", err.Error(), tt.wantErr)
+					}
+				default:
+					t.Error("expected error on errChan, got nothing")
+				}
+			} else {
+				assertNoSend(t, errChan, "errChan")
+			}
+		})
 	}
 }

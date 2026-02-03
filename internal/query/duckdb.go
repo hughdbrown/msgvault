@@ -395,6 +395,133 @@ func (e *DuckDBEngine) buildWhereClause(opts AggregateOptions, keyColumns ...str
 	return strings.Join(conditions, " AND "), args
 }
 
+// timeExpr returns the SQL expression for time grouping based on granularity.
+func timeExpr(g TimeGranularity) string {
+	switch g {
+	case TimeYear:
+		return "CAST(msg.year AS VARCHAR)"
+	case TimeDay:
+		return "strftime(msg.sent_at, '%Y-%m-%d')"
+	default: // TimeMonth
+		return "CAST(msg.year AS VARCHAR) || '-' || LPAD(CAST(msg.month AS VARCHAR), 2, '0')"
+	}
+}
+
+// aggViewDef defines the varying parts of an aggregate query for each view type.
+type aggViewDef struct {
+	keyExpr    string // SQL expression for the grouping key (e.g. "p.email_address")
+	joinClause string // JOIN clause specific to this view
+	nullGuard  string // WHERE condition to exclude NULL keys
+	// keyColumns for buildWhereClause search filtering (passed through to buildAggregateSearchConditions)
+	keyColumns []string
+}
+
+// getViewDef returns the aggregate query definition for a given view type.
+// The tablePrefix is used to alias tables in SubAggregate to avoid conflicts
+// with CTE names used in filter conditions. Pass "" for top-level aggregates.
+func getViewDef(view ViewType, granularity TimeGranularity, tablePrefix string) (aggViewDef, error) {
+	// Use prefix for table aliases in SubAggregate (e.g. "mr_agg", "p_agg")
+	// to avoid ambiguity with CTE names used in WHERE clause EXISTS subqueries.
+	mrAlias := "mr"
+	pAlias := "p"
+	mlAlias := "ml"
+	lblAlias := "lbl"
+	if tablePrefix != "" {
+		mrAlias = "mr_" + tablePrefix
+		pAlias = "p_" + tablePrefix
+		mlAlias = "ml_" + tablePrefix
+		lblAlias = "lbl_" + tablePrefix
+	}
+
+	switch view {
+	case ViewSenders:
+		return aggViewDef{
+			keyExpr:    pAlias + ".email_address",
+			joinClause: fmt.Sprintf("JOIN mr %s ON %s.message_id = msg.id AND %s.recipient_type = 'from'\n\t\t\t\tJOIN p %s ON %s.id = %s.participant_id", mrAlias, mrAlias, mrAlias, pAlias, pAlias, mrAlias),
+			nullGuard:  pAlias + ".email_address IS NOT NULL",
+		}, nil
+	case ViewSenderNames:
+		nameExpr := fmt.Sprintf("COALESCE(NULLIF(TRIM(%s.display_name), ''), %s.email_address)", pAlias, pAlias)
+		return aggViewDef{
+			keyExpr:    nameExpr,
+			joinClause: fmt.Sprintf("JOIN mr %s ON %s.message_id = msg.id AND %s.recipient_type = 'from'\n\t\t\t\tJOIN p %s ON %s.id = %s.participant_id", mrAlias, mrAlias, mrAlias, pAlias, pAlias, mrAlias),
+			nullGuard:  nameExpr + " IS NOT NULL",
+		}, nil
+	case ViewRecipients:
+		return aggViewDef{
+			keyExpr:    pAlias + ".email_address",
+			joinClause: fmt.Sprintf("JOIN mr %s ON %s.message_id = msg.id AND %s.recipient_type IN ('to', 'cc', 'bcc')\n\t\t\t\tJOIN p %s ON %s.id = %s.participant_id", mrAlias, mrAlias, mrAlias, pAlias, pAlias, mrAlias),
+			nullGuard:  pAlias + ".email_address IS NOT NULL",
+			keyColumns: []string{pAlias + ".email_address", pAlias + ".display_name"},
+		}, nil
+	case ViewRecipientNames:
+		nameExpr := fmt.Sprintf("COALESCE(NULLIF(TRIM(%s.display_name), ''), %s.email_address)", pAlias, pAlias)
+		return aggViewDef{
+			keyExpr:    nameExpr,
+			joinClause: fmt.Sprintf("JOIN mr %s ON %s.message_id = msg.id AND %s.recipient_type IN ('to', 'cc', 'bcc')\n\t\t\t\tJOIN p %s ON %s.id = %s.participant_id", mrAlias, mrAlias, mrAlias, pAlias, pAlias, mrAlias),
+			nullGuard:  nameExpr + " IS NOT NULL",
+			keyColumns: []string{pAlias + ".email_address", pAlias + ".display_name"},
+		}, nil
+	case ViewDomains:
+		return aggViewDef{
+			keyExpr:    pAlias + ".domain",
+			joinClause: fmt.Sprintf("JOIN mr %s ON %s.message_id = msg.id AND %s.recipient_type = 'from'\n\t\t\t\tJOIN p %s ON %s.id = %s.participant_id", mrAlias, mrAlias, mrAlias, pAlias, pAlias, mrAlias),
+			nullGuard:  pAlias + ".domain IS NOT NULL AND " + pAlias + ".domain != ''",
+		}, nil
+	case ViewLabels:
+		return aggViewDef{
+			keyExpr:    lblAlias + ".name",
+			joinClause: fmt.Sprintf("JOIN ml %s ON %s.message_id = msg.id\n\t\t\t\tJOIN lbl %s ON %s.id = %s.label_id", mlAlias, mlAlias, lblAlias, lblAlias, mlAlias),
+			nullGuard:  lblAlias + ".name IS NOT NULL",
+			keyColumns: []string{lblAlias + ".name"},
+		}, nil
+	case ViewTime:
+		return aggViewDef{
+			keyExpr:   timeExpr(granularity),
+			nullGuard: "msg.sent_at IS NOT NULL",
+		}, nil
+	default:
+		return aggViewDef{}, fmt.Errorf("unsupported view type: %v", view)
+	}
+}
+
+// runAggregation executes a generic aggregation query using the view definition.
+func (e *DuckDBEngine) runAggregation(ctx context.Context, def aggViewDef, whereClause string, args []interface{}, opts AggregateOptions) ([]AggregateRow, error) {
+	limit := opts.Limit
+	if limit == 0 {
+		limit = 100
+	}
+
+	fullWhere := whereClause
+	if def.nullGuard != "" {
+		fullWhere += " AND " + def.nullGuard
+	}
+
+	query := fmt.Sprintf(`
+		WITH %s
+		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
+		FROM (
+			SELECT
+				%s as key,
+				COUNT(*) as count,
+				COALESCE(SUM(msg.size_estimate), 0) as total_size,
+				CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
+				CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
+				COUNT(*) OVER() as total_unique
+			FROM msg
+			%s
+			LEFT JOIN att ON att.message_id = msg.id
+			WHERE %s
+			GROUP BY %s
+		)
+		%s
+		LIMIT ?
+	`, e.parquetCTEs(), def.keyExpr, def.joinClause, fullWhere, def.keyExpr, e.sortClause(opts))
+
+	args = append(args, limit)
+	return e.executeAggregateQuery(ctx, query, args)
+}
+
 // sortClause returns ORDER BY clause for aggregates.
 func (e *DuckDBEngine) sortClause(opts AggregateOptions) string {
 	field := "count"
@@ -415,270 +542,19 @@ func (e *DuckDBEngine) sortClause(opts AggregateOptions) string {
 	return fmt.Sprintf("ORDER BY %s %s", field, dir)
 }
 
-// AggregateBySender groups messages by sender email.
-func (e *DuckDBEngine) AggregateBySender(ctx context.Context, opts AggregateOptions) ([]AggregateRow, error) {
-	where, args := e.buildWhereClause(opts)
-
-	limit := opts.Limit
-	if limit == 0 {
-		limit = 100
+// aggregateByView is the generic implementation for all AggregateBy* methods.
+func (e *DuckDBEngine) aggregateByView(ctx context.Context, view ViewType, opts AggregateOptions) ([]AggregateRow, error) {
+	def, err := getViewDef(view, opts.TimeGranularity, "")
+	if err != nil {
+		return nil, err
 	}
-
-	// Join messages -> message_recipients (from) -> participants for sender email
-	query := fmt.Sprintf(`
-		WITH %s
-		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-		FROM (
-			SELECT
-				p.email_address as key,
-				COUNT(*) as count,
-				COALESCE(SUM(msg.size_estimate), 0) as total_size,
-				CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-				CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-				COUNT(*) OVER() as total_unique
-			FROM msg
-			JOIN mr ON mr.message_id = msg.id AND mr.recipient_type = 'from'
-			JOIN p ON p.id = mr.participant_id
-			LEFT JOIN att ON att.message_id = msg.id
-			WHERE %s AND p.email_address IS NOT NULL
-			GROUP BY p.email_address
-		)
-		%s
-		LIMIT ?
-	`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	args = append(args, limit)
-	return e.executeAggregateQuery(ctx, query, args)
+	where, args := e.buildWhereClause(opts, def.keyColumns...)
+	return e.runAggregation(ctx, def, where, args, opts)
 }
 
-// AggregateBySenderName groups messages by sender display name.
-// Uses COALESCE(display_name, email_address) so senders without a display name
-// fall back to their email address.
-func (e *DuckDBEngine) AggregateBySenderName(ctx context.Context, opts AggregateOptions) ([]AggregateRow, error) {
-	where, args := e.buildWhereClause(opts)
-
-	limit := opts.Limit
-	if limit == 0 {
-		limit = 100
-	}
-
-	query := fmt.Sprintf(`
-		WITH %s
-		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-		FROM (
-			SELECT
-				COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) as key,
-				COUNT(*) as count,
-				COALESCE(SUM(msg.size_estimate), 0) as total_size,
-				CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-				CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-				COUNT(*) OVER() as total_unique
-			FROM msg
-			JOIN mr ON mr.message_id = msg.id AND mr.recipient_type = 'from'
-			JOIN p ON p.id = mr.participant_id
-			LEFT JOIN att ON att.message_id = msg.id
-			WHERE %s AND COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) IS NOT NULL
-			GROUP BY COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address)
-		)
-		%s
-		LIMIT ?
-	`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	args = append(args, limit)
-	return e.executeAggregateQuery(ctx, query, args)
-}
-
-// AggregateByRecipient groups messages by recipient email.
-// Includes to, cc, and bcc recipients.
-func (e *DuckDBEngine) AggregateByRecipient(ctx context.Context, opts AggregateOptions) ([]AggregateRow, error) {
-	where, args := e.buildWhereClause(opts, "p.email_address", "p.display_name")
-
-	limit := opts.Limit
-	if limit == 0 {
-		limit = 100
-	}
-
-	// Join messages -> message_recipients (to/cc/bcc) -> participants for recipient email
-	query := fmt.Sprintf(`
-		WITH %s
-		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-		FROM (
-			SELECT
-				p.email_address as key,
-				COUNT(*) as count,
-				COALESCE(SUM(msg.size_estimate), 0) as total_size,
-				CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-				CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-				COUNT(*) OVER() as total_unique
-			FROM msg
-			JOIN mr ON mr.message_id = msg.id AND mr.recipient_type IN ('to', 'cc', 'bcc')
-			JOIN p ON p.id = mr.participant_id
-			LEFT JOIN att ON att.message_id = msg.id
-			WHERE %s AND p.email_address IS NOT NULL
-			GROUP BY p.email_address
-		)
-		%s
-		LIMIT ?
-	`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	args = append(args, limit)
-	return e.executeAggregateQuery(ctx, query, args)
-}
-
-// AggregateByRecipientName groups messages by recipient display name.
-// Uses COALESCE(display_name, email_address) so recipients without a display name
-// fall back to their email address.
-func (e *DuckDBEngine) AggregateByRecipientName(ctx context.Context, opts AggregateOptions) ([]AggregateRow, error) {
-	where, args := e.buildWhereClause(opts, "p.email_address", "p.display_name")
-
-	limit := opts.Limit
-	if limit == 0 {
-		limit = 100
-	}
-
-	query := fmt.Sprintf(`
-		WITH %s
-		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-		FROM (
-			SELECT
-				COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) as key,
-				COUNT(*) as count,
-				COALESCE(SUM(msg.size_estimate), 0) as total_size,
-				CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-				CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-				COUNT(*) OVER() as total_unique
-			FROM msg
-			JOIN mr ON mr.message_id = msg.id AND mr.recipient_type IN ('to', 'cc', 'bcc')
-			JOIN p ON p.id = mr.participant_id
-			LEFT JOIN att ON att.message_id = msg.id
-			WHERE %s AND COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) IS NOT NULL
-			GROUP BY COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address)
-		)
-		%s
-		LIMIT ?
-	`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	args = append(args, limit)
-	return e.executeAggregateQuery(ctx, query, args)
-}
-
-// AggregateByDomain groups messages by sender domain.
-func (e *DuckDBEngine) AggregateByDomain(ctx context.Context, opts AggregateOptions) ([]AggregateRow, error) {
-	where, args := e.buildWhereClause(opts)
-
-	limit := opts.Limit
-	if limit == 0 {
-		limit = 100
-	}
-
-	// Join messages -> message_recipients (from) -> participants for sender domain
-	query := fmt.Sprintf(`
-		WITH %s
-		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-		FROM (
-			SELECT
-				p.domain as key,
-				COUNT(*) as count,
-				COALESCE(SUM(msg.size_estimate), 0) as total_size,
-				CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-				CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-				COUNT(*) OVER() as total_unique
-			FROM msg
-			JOIN mr ON mr.message_id = msg.id AND mr.recipient_type = 'from'
-			JOIN p ON p.id = mr.participant_id
-			LEFT JOIN att ON att.message_id = msg.id
-			WHERE %s AND p.domain IS NOT NULL AND p.domain != ''
-			GROUP BY p.domain
-		)
-		%s
-		LIMIT ?
-	`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	args = append(args, limit)
-	return e.executeAggregateQuery(ctx, query, args)
-}
-
-// AggregateByLabel groups messages by label.
-func (e *DuckDBEngine) AggregateByLabel(ctx context.Context, opts AggregateOptions) ([]AggregateRow, error) {
-	where, args := e.buildWhereClause(opts, "lbl.name")
-
-	limit := opts.Limit
-	if limit == 0 {
-		limit = 100
-	}
-
-	// Join messages -> message_labels -> labels for label name
-	query := fmt.Sprintf(`
-		WITH %s
-		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-		FROM (
-			SELECT
-				lbl.name as key,
-				COUNT(*) as count,
-				COALESCE(SUM(msg.size_estimate), 0) as total_size,
-				CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-				CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-				COUNT(*) OVER() as total_unique
-			FROM msg
-			JOIN ml ON ml.message_id = msg.id
-			JOIN lbl ON lbl.id = ml.label_id
-			LEFT JOIN att ON att.message_id = msg.id
-			WHERE %s AND lbl.name IS NOT NULL
-			GROUP BY lbl.name
-		)
-		%s
-		LIMIT ?
-	`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	args = append(args, limit)
-	return e.executeAggregateQuery(ctx, query, args)
-}
-
-// AggregateByTime groups messages by time period.
-func (e *DuckDBEngine) AggregateByTime(ctx context.Context, opts AggregateOptions) ([]AggregateRow, error) {
-	where, args := e.buildWhereClause(opts)
-
-	limit := opts.Limit
-	if limit == 0 {
-		limit = 100
-	}
-
-	// Build time grouping expression based on granularity
-	var timeExpr string
-	switch opts.TimeGranularity {
-	case TimeYear:
-		timeExpr = "CAST(msg.year AS VARCHAR)"
-	case TimeMonth:
-		timeExpr = "CAST(msg.year AS VARCHAR) || '-' || LPAD(CAST(msg.month AS VARCHAR), 2, '0')"
-	case TimeDay:
-		timeExpr = "strftime(msg.sent_at, '%Y-%m-%d')"
-	default:
-		timeExpr = "CAST(msg.year AS VARCHAR) || '-' || LPAD(CAST(msg.month AS VARCHAR), 2, '0')"
-	}
-
-	// Time aggregation with attachment stats from separate table
-	query := fmt.Sprintf(`
-		WITH %s
-		SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-		FROM (
-			SELECT
-				%s as key,
-				COUNT(*) as count,
-				COALESCE(SUM(msg.size_estimate), 0) as total_size,
-				CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-				CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-				COUNT(*) OVER() as total_unique
-			FROM msg
-			LEFT JOIN att ON att.message_id = msg.id
-			WHERE %s AND msg.sent_at IS NOT NULL
-			GROUP BY key
-		)
-		%s
-		LIMIT ?
-	`, e.parquetCTEs(), timeExpr, where, e.sortClause(opts))
-
-	args = append(args, limit)
-	return e.executeAggregateQuery(ctx, query, args)
+// Aggregate performs grouping based on the provided ViewType.
+func (e *DuckDBEngine) Aggregate(ctx context.Context, groupBy ViewType, opts AggregateOptions) ([]AggregateRow, error) {
+	return e.aggregateByView(ctx, groupBy, opts)
 }
 
 // buildFilterConditions builds WHERE conditions from a MessageFilter.
@@ -722,7 +598,7 @@ func (e *DuckDBEngine) buildFilterConditions(filter MessageFilter) (string, []in
 			  AND p.email_address = ?
 		)`)
 		args = append(args, filter.Sender)
-	} else if filter.MatchEmptySender {
+	} else if filter.MatchesEmpty(ViewSenders) {
 		conditions = append(conditions, `NOT EXISTS (
 			SELECT 1 FROM mr
 			JOIN p ON p.id = mr.participant_id
@@ -743,7 +619,7 @@ func (e *DuckDBEngine) buildFilterConditions(filter MessageFilter) (string, []in
 			  AND COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) = ?
 		)`)
 		args = append(args, filter.SenderName)
-	} else if filter.MatchEmptySenderName {
+	} else if filter.MatchesEmpty(ViewSenderNames) {
 		conditions = append(conditions, `NOT EXISTS (
 			SELECT 1 FROM mr
 			JOIN p ON p.id = mr.participant_id
@@ -763,7 +639,7 @@ func (e *DuckDBEngine) buildFilterConditions(filter MessageFilter) (string, []in
 			  AND p.email_address = ?
 		)`)
 		args = append(args, filter.Recipient)
-	} else if filter.MatchEmptyRecipient {
+	} else if filter.MatchesEmpty(ViewRecipients) {
 		conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM mr WHERE mr.message_id = msg.id AND mr.recipient_type IN ('to', 'cc', 'bcc'))")
 	}
 
@@ -777,7 +653,7 @@ func (e *DuckDBEngine) buildFilterConditions(filter MessageFilter) (string, []in
 			  AND COALESCE(NULLIF(TRIM(p.display_name), ''), p.email_address) = ?
 		)`)
 		args = append(args, filter.RecipientName)
-	} else if filter.MatchEmptyRecipientName {
+	} else if filter.MatchesEmpty(ViewRecipientNames) {
 		conditions = append(conditions, `NOT EXISTS (
 			SELECT 1 FROM mr
 			JOIN p ON p.id = mr.participant_id
@@ -797,7 +673,7 @@ func (e *DuckDBEngine) buildFilterConditions(filter MessageFilter) (string, []in
 			  AND p.domain = ?
 		)`)
 		args = append(args, filter.Domain)
-	} else if filter.MatchEmptyDomain {
+	} else if filter.MatchesEmpty(ViewDomains) {
 		conditions = append(conditions, `NOT EXISTS (
 			SELECT 1 FROM mr
 			JOIN p ON p.id = mr.participant_id
@@ -817,35 +693,15 @@ func (e *DuckDBEngine) buildFilterConditions(filter MessageFilter) (string, []in
 			  AND lbl.name = ?
 		)`)
 		args = append(args, filter.Label)
-	} else if filter.MatchEmptyLabel {
+	} else if filter.MatchesEmpty(ViewLabels) {
 		conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM ml WHERE ml.message_id = msg.id)")
 	}
 
 	// Time period filter
-	if filter.TimePeriod != "" {
-		granularity := filter.TimeGranularity
-		if granularity == TimeYear && len(filter.TimePeriod) > 4 {
-			switch len(filter.TimePeriod) {
-			case 7:
-				granularity = TimeMonth
-			case 10:
-				granularity = TimeDay
-			}
-		}
-
-		var timeExpr string
-		switch granularity {
-		case TimeYear:
-			timeExpr = "CAST(msg.year AS VARCHAR)"
-		case TimeMonth:
-			timeExpr = "CAST(msg.year AS VARCHAR) || '-' || LPAD(CAST(msg.month AS VARCHAR), 2, '0')"
-		case TimeDay:
-			timeExpr = "strftime(msg.sent_at, '%Y-%m-%d')"
-		default:
-			timeExpr = "CAST(msg.year AS VARCHAR) || '-' || LPAD(CAST(msg.month AS VARCHAR), 2, '0')"
-		}
-		conditions = append(conditions, fmt.Sprintf("%s = ?", timeExpr))
-		args = append(args, filter.TimePeriod)
+	if filter.TimeRange.Period != "" {
+		granularity := inferTimeGranularity(filter.TimeRange.Granularity, filter.TimeRange.Period)
+		conditions = append(conditions, fmt.Sprintf("%s = ?", timeExpr(granularity)))
+		args = append(args, filter.TimeRange.Period)
 	}
 
 	if len(conditions) == 0 {
@@ -854,9 +710,27 @@ func (e *DuckDBEngine) buildFilterConditions(filter MessageFilter) (string, []in
 	return strings.Join(conditions, " AND "), args
 }
 
+// inferTimeGranularity adjusts the granularity based on the time period string length.
+func inferTimeGranularity(base TimeGranularity, period string) TimeGranularity {
+	if base == TimeYear && len(period) > 4 {
+		switch len(period) {
+		case 7:
+			return TimeMonth
+		case 10:
+			return TimeDay
+		}
+	}
+	return base
+}
+
 // SubAggregate performs aggregation on a filtered subset of messages.
 // This is used for sub-grouping after drill-down.
 func (e *DuckDBEngine) SubAggregate(ctx context.Context, filter MessageFilter, groupBy ViewType, opts AggregateOptions) ([]AggregateRow, error) {
+	def, err := getViewDef(groupBy, opts.TimeGranularity, "agg")
+	if err != nil {
+		return nil, err
+	}
+
 	where, args := e.buildFilterConditions(filter)
 
 	// Add opts-based conditions (source_id, date range, attachment filter)
@@ -876,208 +750,14 @@ func (e *DuckDBEngine) SubAggregate(ctx context.Context, filter MessageFilter, g
 		where += " AND msg.has_attachments = true"
 	}
 
-	limit := opts.Limit
-	if limit == 0 {
-		limit = 100
-	}
-
-	// For 1:N views (Recipients, RecipientNames, Labels), search must filter
-	// on the grouping key column to avoid inflated counts from summing across groups.
-	// For 1:1 views (Senders, SenderNames, Domains, Time), the default
-	// subject+sender search is correct and more useful.
-	var searchKeyColumns []string
-	switch groupBy {
-	case ViewRecipients, ViewRecipientNames:
-		searchKeyColumns = []string{"p_agg.email_address", "p_agg.display_name"}
-	case ViewLabels:
-		searchKeyColumns = []string{"lbl_agg.name"}
-	}
-
-	// Add search query conditions (for filtered drill-down)
-	searchConds, searchArgs := e.buildAggregateSearchConditions(opts.SearchQuery, searchKeyColumns...)
+	// Add search query conditions using the view's key columns
+	searchConds, searchArgs := e.buildAggregateSearchConditions(opts.SearchQuery, def.keyColumns...)
 	for _, cond := range searchConds {
 		where += " AND " + cond
 	}
 	args = append(args, searchArgs...)
 
-	var query string
-	switch groupBy {
-	case ViewSenders:
-		query = fmt.Sprintf(`
-			WITH %s
-			SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-			FROM (
-				SELECT
-					p_agg.email_address as key,
-					COUNT(*) as count,
-					COALESCE(SUM(msg.size_estimate), 0) as total_size,
-					CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-					CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-					COUNT(*) OVER() as total_unique
-				FROM msg
-				JOIN mr mr_agg ON mr_agg.message_id = msg.id AND mr_agg.recipient_type = 'from'
-				JOIN p p_agg ON p_agg.id = mr_agg.participant_id
-				LEFT JOIN att ON att.message_id = msg.id
-				WHERE %s AND p_agg.email_address IS NOT NULL
-				GROUP BY p_agg.email_address
-			)
-			%s
-			LIMIT ?
-		`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	case ViewSenderNames:
-		query = fmt.Sprintf(`
-			WITH %s
-			SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-			FROM (
-				SELECT
-					COALESCE(NULLIF(TRIM(p_agg.display_name), ''), p_agg.email_address) as key,
-					COUNT(*) as count,
-					COALESCE(SUM(msg.size_estimate), 0) as total_size,
-					CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-					CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-					COUNT(*) OVER() as total_unique
-				FROM msg
-				JOIN mr mr_agg ON mr_agg.message_id = msg.id AND mr_agg.recipient_type = 'from'
-				JOIN p p_agg ON p_agg.id = mr_agg.participant_id
-				LEFT JOIN att ON att.message_id = msg.id
-				WHERE %s AND COALESCE(NULLIF(TRIM(p_agg.display_name), ''), p_agg.email_address) IS NOT NULL
-				GROUP BY COALESCE(NULLIF(TRIM(p_agg.display_name), ''), p_agg.email_address)
-			)
-			%s
-			LIMIT ?
-		`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	case ViewRecipients:
-		query = fmt.Sprintf(`
-			WITH %s
-			SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-			FROM (
-				SELECT
-					p_agg.email_address as key,
-					COUNT(*) as count,
-					COALESCE(SUM(msg.size_estimate), 0) as total_size,
-					CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-					CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-					COUNT(*) OVER() as total_unique
-				FROM msg
-				JOIN mr mr_agg ON mr_agg.message_id = msg.id AND mr_agg.recipient_type IN ('to', 'cc', 'bcc')
-				JOIN p p_agg ON p_agg.id = mr_agg.participant_id
-				LEFT JOIN att ON att.message_id = msg.id
-				WHERE %s AND p_agg.email_address IS NOT NULL
-				GROUP BY p_agg.email_address
-			)
-			%s
-			LIMIT ?
-		`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	case ViewRecipientNames:
-		query = fmt.Sprintf(`
-			WITH %s
-			SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-			FROM (
-				SELECT
-					COALESCE(NULLIF(TRIM(p_agg.display_name), ''), p_agg.email_address) as key,
-					COUNT(*) as count,
-					COALESCE(SUM(msg.size_estimate), 0) as total_size,
-					CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-					CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-					COUNT(*) OVER() as total_unique
-				FROM msg
-				JOIN mr mr_agg ON mr_agg.message_id = msg.id AND mr_agg.recipient_type IN ('to', 'cc', 'bcc')
-				JOIN p p_agg ON p_agg.id = mr_agg.participant_id
-				LEFT JOIN att ON att.message_id = msg.id
-				WHERE %s AND COALESCE(NULLIF(TRIM(p_agg.display_name), ''), p_agg.email_address) IS NOT NULL
-				GROUP BY COALESCE(NULLIF(TRIM(p_agg.display_name), ''), p_agg.email_address)
-			)
-			%s
-			LIMIT ?
-		`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	case ViewDomains:
-		query = fmt.Sprintf(`
-			WITH %s
-			SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-			FROM (
-				SELECT
-					p_agg.domain as key,
-					COUNT(*) as count,
-					COALESCE(SUM(msg.size_estimate), 0) as total_size,
-					CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-					CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-					COUNT(*) OVER() as total_unique
-				FROM msg
-				JOIN mr mr_agg ON mr_agg.message_id = msg.id AND mr_agg.recipient_type = 'from'
-				JOIN p p_agg ON p_agg.id = mr_agg.participant_id
-				LEFT JOIN att ON att.message_id = msg.id
-				WHERE %s AND p_agg.domain IS NOT NULL
-				GROUP BY p_agg.domain
-			)
-			%s
-			LIMIT ?
-		`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	case ViewLabels:
-		query = fmt.Sprintf(`
-			WITH %s
-			SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-			FROM (
-				SELECT
-					lbl_agg.name as key,
-					COUNT(*) as count,
-					COALESCE(SUM(msg.size_estimate), 0) as total_size,
-					CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-					CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-					COUNT(*) OVER() as total_unique
-				FROM msg
-				JOIN ml ml_agg ON ml_agg.message_id = msg.id
-				JOIN lbl lbl_agg ON lbl_agg.id = ml_agg.label_id
-				LEFT JOIN att ON att.message_id = msg.id
-				WHERE %s AND lbl_agg.name IS NOT NULL
-				GROUP BY lbl_agg.name
-			)
-			%s
-			LIMIT ?
-		`, e.parquetCTEs(), where, e.sortClause(opts))
-
-	case ViewTime:
-		var timeExpr string
-		switch opts.TimeGranularity {
-		case TimeYear:
-			timeExpr = "CAST(msg.year AS VARCHAR)"
-		case TimeMonth:
-			timeExpr = "CAST(msg.year AS VARCHAR) || '-' || LPAD(CAST(msg.month AS VARCHAR), 2, '0')"
-		case TimeDay:
-			timeExpr = "strftime(msg.sent_at, '%Y-%m-%d')"
-		default:
-			timeExpr = "CAST(msg.year AS VARCHAR) || '-' || LPAD(CAST(msg.month AS VARCHAR), 2, '0')"
-		}
-		query = fmt.Sprintf(`
-			WITH %s
-			SELECT key, count, total_size, attachment_size, attachment_count, total_unique
-			FROM (
-				SELECT
-					%s as key,
-					COUNT(*) as count,
-					COALESCE(SUM(msg.size_estimate), 0) as total_size,
-					CAST(COALESCE(SUM(att.attachment_size), 0) AS BIGINT) as attachment_size,
-					CAST(COALESCE(SUM(att.attachment_count), 0) AS BIGINT) as attachment_count,
-					COUNT(*) OVER() as total_unique
-				FROM msg
-				LEFT JOIN att ON att.message_id = msg.id
-				WHERE %s AND msg.sent_at IS NOT NULL
-				GROUP BY key
-			)
-			%s
-			LIMIT ?
-		`, e.parquetCTEs(), timeExpr, where, e.sortClause(opts))
-
-	default:
-		return nil, fmt.Errorf("unsupported groupBy view type: %v", groupBy)
-	}
-
-	args = append(args, limit)
-	return e.executeAggregateQuery(ctx, query, args)
+	return e.runAggregation(ctx, def, where, args, opts)
 }
 
 // executeAggregateQuery runs an aggregate query and returns the results.
@@ -1228,7 +908,7 @@ func (e *DuckDBEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 
 	// Build ORDER BY
 	var orderBy string
-	switch filter.SortField {
+	switch filter.Sorting.Field {
 	case MessageSortByDate:
 		orderBy = "msg.sent_at"
 	case MessageSortBySize:
@@ -1238,13 +918,13 @@ func (e *DuckDBEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 	default:
 		orderBy = "msg.sent_at"
 	}
-	if filter.SortDirection == SortDesc {
+	if filter.Sorting.Direction == SortDesc {
 		orderBy += " DESC"
 	} else {
 		orderBy += " ASC"
 	}
 
-	limit := filter.Limit
+	limit := filter.Pagination.Limit
 	if limit == 0 {
 		limit = 500
 	}
@@ -1290,7 +970,7 @@ func (e *DuckDBEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 		ORDER BY %s
 	`, e.parquetCTEs(), where, orderBy, orderBy)
 
-	args = append(args, limit, filter.Offset)
+	args = append(args, limit, filter.Pagination.Offset)
 
 	rows, err := e.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1906,30 +1586,20 @@ func (e *DuckDBEngine) GetGmailIDsByFilter(ctx context.Context, filter MessageFi
 		args = append(args, filter.Label)
 	}
 
-	if filter.TimePeriod != "" {
-		granularity := filter.TimeGranularity
-		if granularity == TimeYear && len(filter.TimePeriod) > 4 {
-			switch len(filter.TimePeriod) {
-			case 7:
-				granularity = TimeMonth
-			case 10:
-				granularity = TimeDay
-			}
-		}
-
-		var timeExpr string
+	if filter.TimeRange.Period != "" {
+		granularity := inferTimeGranularity(filter.TimeRange.Granularity, filter.TimeRange.Period)
+		// GetGmailIDsByFilter uses strftime for time filtering (no year/month columns)
+		var te string
 		switch granularity {
 		case TimeYear:
-			timeExpr = "strftime(msg.sent_at, '%Y')"
-		case TimeMonth:
-			timeExpr = "strftime(msg.sent_at, '%Y-%m')"
+			te = "strftime(msg.sent_at, '%Y')"
 		case TimeDay:
-			timeExpr = "strftime(msg.sent_at, '%Y-%m-%d')"
+			te = "strftime(msg.sent_at, '%Y-%m-%d')"
 		default:
-			timeExpr = "strftime(msg.sent_at, '%Y-%m')"
+			te = "strftime(msg.sent_at, '%Y-%m')"
 		}
-		conditions = append(conditions, fmt.Sprintf("%s = ?", timeExpr))
-		args = append(args, filter.TimePeriod)
+		conditions = append(conditions, fmt.Sprintf("%s = ?", te))
+		args = append(args, filter.TimeRange.Period)
 	}
 
 	// Build query
@@ -1941,9 +1611,9 @@ func (e *DuckDBEngine) GetGmailIDsByFilter(ctx context.Context, filter MessageFi
 	`, e.parquetCTEs(), strings.Join(conditions, " AND "))
 
 	// Only add LIMIT if explicitly set (0 means no limit)
-	if filter.Limit > 0 {
+	if filter.Pagination.Limit > 0 {
 		query += " LIMIT ?"
-		args = append(args, filter.Limit)
+		args = append(args, filter.Pagination.Limit)
 	}
 
 	rows, err := e.db.QueryContext(ctx, query, args...)
@@ -2165,29 +1835,10 @@ func (e *DuckDBEngine) buildSearchConditions(q *search.Query, filter MessageFilt
 		)`)
 		args = append(args, filter.Label)
 	}
-	if filter.TimePeriod != "" {
-		granularity := filter.TimeGranularity
-		if granularity == TimeYear && len(filter.TimePeriod) > 4 {
-			switch len(filter.TimePeriod) {
-			case 7:
-				granularity = TimeMonth
-			case 10:
-				granularity = TimeDay
-			}
-		}
-		var timeExpr string
-		switch granularity {
-		case TimeYear:
-			timeExpr = "CAST(msg.year AS VARCHAR)"
-		case TimeMonth:
-			timeExpr = "CAST(msg.year AS VARCHAR) || '-' || LPAD(CAST(msg.month AS VARCHAR), 2, '0')"
-		case TimeDay:
-			timeExpr = "strftime(msg.sent_at, '%Y-%m-%d')"
-		default:
-			timeExpr = "CAST(msg.year AS VARCHAR) || '-' || LPAD(CAST(msg.month AS VARCHAR), 2, '0')"
-		}
-		conditions = append(conditions, fmt.Sprintf("%s = ?", timeExpr))
-		args = append(args, filter.TimePeriod)
+	if filter.TimeRange.Period != "" {
+		granularity := inferTimeGranularity(filter.TimeRange.Granularity, filter.TimeRange.Period)
+		conditions = append(conditions, fmt.Sprintf("%s = ?", timeExpr(granularity)))
+		args = append(args, filter.TimeRange.Period)
 	}
 
 	// Text search terms - search subject and from fields only (fast path)

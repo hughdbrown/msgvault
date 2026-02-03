@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ func TestAggregations(t *testing.T) {
 	type testCase struct {
 		name    string
 		aggName string
+		view    ViewType
 		want    []aggExpectation
 	}
 
@@ -19,31 +21,37 @@ func TestAggregations(t *testing.T) {
 		{
 			name:    "BySender",
 			aggName: "AggregateBySender",
+			view:    ViewSenders,
 			want:    []aggExpectation{{"alice@example.com", 3}, {"bob@company.org", 2}},
 		},
 		{
 			name:    "BySenderName",
 			aggName: "AggregateBySenderName",
+			view:    ViewSenderNames,
 			want:    []aggExpectation{{"Alice Smith", 3}, {"Bob Jones", 2}},
 		},
 		{
 			name:    "ByRecipient",
 			aggName: "AggregateByRecipient",
+			view:    ViewRecipients,
 			want:    []aggExpectation{{"bob@company.org", 3}, {"alice@example.com", 2}, {"carol@example.com", 1}},
 		},
 		{
 			name:    "ByDomain",
 			aggName: "AggregateByDomain",
+			view:    ViewDomains,
 			want:    []aggExpectation{{"example.com", 3}, {"company.org", 2}},
 		},
 		{
 			name:    "ByLabel",
 			aggName: "AggregateByLabel",
+			view:    ViewLabels,
 			want:    []aggExpectation{{"INBOX", 5}, {"Work", 2}, {"IMPORTANT", 1}},
 		},
 		{
 			name:    "ByRecipientName",
 			aggName: "AggregateByRecipientName",
+			view:    ViewRecipientNames,
 			want:    []aggExpectation{{"Bob Jones", 3}, {"Alice Smith", 2}, {"Carol White", 1}},
 		},
 	}
@@ -51,19 +59,7 @@ func TestAggregations(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newTestEnv(t)
-			aggFuncs := map[string]func(context.Context, AggregateOptions) ([]AggregateRow, error){
-				"AggregateBySender":        env.Engine.AggregateBySender,
-				"AggregateBySenderName":    env.Engine.AggregateBySenderName,
-				"AggregateByRecipient":     env.Engine.AggregateByRecipient,
-				"AggregateByDomain":        env.Engine.AggregateByDomain,
-				"AggregateByLabel":         env.Engine.AggregateByLabel,
-				"AggregateByRecipientName": env.Engine.AggregateByRecipientName,
-			}
-			aggFunc, ok := aggFuncs[tc.aggName]
-			if !ok {
-				t.Fatalf("unknown aggName %q", tc.aggName)
-			}
-			rows, err := aggFunc(env.Ctx, DefaultAggregateOptions())
+			rows, err := env.Engine.Aggregate(env.Ctx, tc.view, DefaultAggregateOptions())
 			if err != nil {
 				t.Fatalf("%s: %v", tc.aggName, err)
 			}
@@ -78,7 +74,7 @@ func TestAggregateBySenderName_FallbackToEmail(t *testing.T) {
 	noNameID := env.AddParticipant(dbtest.ParticipantOpts{Email: dbtest.StrPtr("noname@test.com"), DisplayName: nil, Domain: "test.com"})
 	env.AddMessage(dbtest.MessageOpts{Subject: "No Name Test", SentAt: "2024-05-01 10:00:00", FromID: noNameID})
 
-	rows, err := env.Engine.AggregateBySenderName(env.Ctx, DefaultAggregateOptions())
+	rows, err := env.Engine.Aggregate(env.Ctx, ViewSenderNames, DefaultAggregateOptions())
 	if err != nil {
 		t.Fatalf("AggregateBySenderName: %v", err)
 	}
@@ -98,7 +94,7 @@ func TestAggregateBySenderName_EmptyStringFallback(t *testing.T) {
 	env.AddMessage(dbtest.MessageOpts{Subject: "Empty Name", SentAt: "2024-05-01 10:00:00", FromID: emptyID})
 	env.AddMessage(dbtest.MessageOpts{Subject: "Spaces Name", SentAt: "2024-05-02 10:00:00", FromID: spacesID})
 
-	rows, err := env.Engine.AggregateBySenderName(env.Ctx, DefaultAggregateOptions())
+	rows, err := env.Engine.Aggregate(env.Ctx, ViewSenderNames, DefaultAggregateOptions())
 	if err != nil {
 		t.Fatalf("AggregateBySenderName: %v", err)
 	}
@@ -127,29 +123,16 @@ func TestAggregateByTime(t *testing.T) {
 	opts := DefaultAggregateOptions()
 	opts.TimeGranularity = TimeMonth
 
-	rows, err := env.Engine.AggregateByTime(env.Ctx, opts)
+	rows, err := env.Engine.Aggregate(env.Ctx, ViewTime, opts)
 	if err != nil {
 		t.Fatalf("AggregateByTime: %v", err)
 	}
 
-	if len(rows) != 3 {
-		t.Errorf("expected 3 months, got %d", len(rows))
-	}
-
-	months := make(map[string]int64)
-	for _, row := range rows {
-		months[row.Key] = row.Count
-	}
-
-	if months["2024-01"] != 2 {
-		t.Errorf("expected 2024-01 count 2, got %d", months["2024-01"])
-	}
-	if months["2024-02"] != 2 {
-		t.Errorf("expected 2024-02 count 2, got %d", months["2024-02"])
-	}
-	if months["2024-03"] != 1 {
-		t.Errorf("expected 2024-03 count 1, got %d", months["2024-03"])
-	}
+	assertAggRows(t, rows, []aggExpectation{
+		{"2024-01", 2},
+		{"2024-02", 2},
+		{"2024-03", 1},
+	})
 }
 
 func TestAggregateWithDateFilter(t *testing.T) {
@@ -159,52 +142,53 @@ func TestAggregateWithDateFilter(t *testing.T) {
 	after := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
 	opts.After = &after
 
-	rows, err := env.Engine.AggregateBySender(env.Ctx, opts)
+	rows, err := env.Engine.Aggregate(env.Ctx, ViewSenders, opts)
 	if err != nil {
 		t.Fatalf("AggregateBySender with date filter: %v", err)
 	}
 
-	if len(rows) != 2 {
-		t.Errorf("expected 2 senders after filter, got %d", len(rows))
-	}
-
-	if rows[0].Key != "bob@company.org" {
-		t.Errorf("expected bob first after filter, got %s", rows[0].Key)
-	}
+	assertAggRows(t, rows, []aggExpectation{
+		{"bob@company.org", 2},
+		{"alice@example.com", 1},
+	})
 }
 
 func TestSortingOptions(t *testing.T) {
 	env := newTestEnv(t)
 
-	opts := DefaultAggregateOptions()
-	opts.SortField = SortBySize
+	t.Run("SortBySizeDesc", func(t *testing.T) {
+		opts := DefaultAggregateOptions()
+		opts.SortField = SortBySize
+		rows, err := env.Engine.Aggregate(env.Ctx, ViewSenders, opts)
+		if err != nil {
+			t.Fatalf("AggregateBySender: %v", err)
+		}
+		assertAggRows(t, rows, []aggExpectation{
+			{"alice@example.com", 3},
+			{"bob@company.org", 2},
+		})
+	})
 
-	rows, err := env.Engine.AggregateBySender(env.Ctx, opts)
-	if err != nil {
-		t.Fatalf("AggregateBySender: %v", err)
-	}
-
-	if rows[0].Key != "alice@example.com" {
-		t.Errorf("expected alice first by size, got %s", rows[0].Key)
-	}
-
-	opts.SortDirection = SortAsc
-
-	rows, err = env.Engine.AggregateBySender(env.Ctx, opts)
-	if err != nil {
-		t.Fatalf("AggregateBySender: %v", err)
-	}
-
-	if rows[0].Key != "bob@company.org" {
-		t.Errorf("expected bob first by size asc, got %s", rows[0].Key)
-	}
+	t.Run("SortBySizeAsc", func(t *testing.T) {
+		opts := DefaultAggregateOptions()
+		opts.SortField = SortBySize
+		opts.SortDirection = SortAsc
+		rows, err := env.Engine.Aggregate(env.Ctx, ViewSenders, opts)
+		if err != nil {
+			t.Fatalf("AggregateBySender: %v", err)
+		}
+		assertAggRows(t, rows, []aggExpectation{
+			{"bob@company.org", 2},
+			{"alice@example.com", 3},
+		})
+	})
 }
 
 func TestWithAttachmentsOnlyAggregate(t *testing.T) {
 	env := newTestEnv(t)
 
 	opts := DefaultAggregateOptions()
-	allRows, err := env.Engine.AggregateBySender(env.Ctx, opts)
+	allRows, err := env.Engine.Aggregate(env.Ctx, ViewSenders, opts)
 	if err != nil {
 		t.Fatalf("AggregateBySender: %v", err)
 	}
@@ -215,7 +199,7 @@ func TestWithAttachmentsOnlyAggregate(t *testing.T) {
 	})
 
 	opts.WithAttachmentsOnly = true
-	attRows, err := env.Engine.AggregateBySender(env.Ctx, opts)
+	attRows, err := env.Engine.Aggregate(env.Ctx, ViewSenders, opts)
 	if err != nil {
 		t.Fatalf("AggregateBySender with attachment filter: %v", err)
 	}
@@ -230,49 +214,67 @@ func TestWithAttachmentsOnlyAggregate(t *testing.T) {
 // SubAggregate tests
 // =============================================================================
 
-func TestSubAggregateBySender(t *testing.T) {
-	env := newTestEnv(t)
-
-	filter := MessageFilter{Recipient: "alice@example.com"}
-	results, err := env.Engine.SubAggregate(env.Ctx, filter, ViewSenders, DefaultAggregateOptions())
-	if err != nil {
-		t.Fatalf("SubAggregate: %v", err)
+func TestSubAggregates(t *testing.T) {
+	tests := []struct {
+		name   string
+		filter MessageFilter
+		view   ViewType
+		want   []aggExpectation
+	}{
+		{
+			name:   "BySender",
+			filter: MessageFilter{Recipient: "alice@example.com"},
+			view:   ViewSenders,
+			want:   []aggExpectation{{"bob@company.org", 2}},
+		},
+		{
+			name:   "BySenderName",
+			filter: MessageFilter{Recipient: "alice@example.com"},
+			view:   ViewSenderNames,
+			want:   []aggExpectation{{"Bob Jones", 2}},
+		},
+		{
+			name:   "ByRecipient",
+			filter: MessageFilter{Sender: "alice@example.com"},
+			view:   ViewRecipients,
+			want:   []aggExpectation{{"bob@company.org", 3}, {"carol@example.com", 1}},
+		},
+		{
+			name:   "ByLabel",
+			filter: MessageFilter{Sender: "alice@example.com"},
+			view:   ViewLabels,
+			want:   []aggExpectation{{"INBOX", 3}, {"IMPORTANT", 1}, {"Work", 1}},
+		},
+		{
+			name:   "ByRecipientName",
+			filter: MessageFilter{Sender: "alice@example.com"},
+			view:   ViewRecipientNames,
+			want:   []aggExpectation{{"Bob Jones", 3}, {"Carol White", 1}},
+		},
+		{
+			name:   "RecipientNameWithRecipient",
+			filter: MessageFilter{Recipient: "bob@company.org", RecipientName: "Bob Jones"},
+			view:   ViewSenders,
+			want:   []aggExpectation{{"alice@example.com", 3}},
+		},
 	}
 
-	if len(results) != 1 {
-		t.Errorf("expected 1 sender to alice@example.com, got %d", len(results))
-	}
-
-	if len(results) > 0 && results[0].Key != "bob@company.org" {
-		t.Errorf("expected bob@company.org, got %s", results[0].Key)
-	}
-
-	if len(results) > 0 && results[0].Count != 2 {
-		t.Errorf("expected count 2, got %d", results[0].Count)
-	}
-}
-
-func TestSubAggregateBySenderName(t *testing.T) {
-	env := newTestEnv(t)
-
-	filter := MessageFilter{Recipient: "alice@example.com"}
-	results, err := env.Engine.SubAggregate(env.Ctx, filter, ViewSenderNames, DefaultAggregateOptions())
-	if err != nil {
-		t.Fatalf("SubAggregate: %v", err)
-	}
-
-	if len(results) != 1 {
-		t.Errorf("expected 1 sender name to alice, got %d", len(results))
-	}
-	if len(results) > 0 && results[0].Key != "Bob Jones" {
-		t.Errorf("expected 'Bob Jones', got %q", results[0].Key)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			results, err := env.Engine.SubAggregate(env.Ctx, tc.filter, tc.view, DefaultAggregateOptions())
+			if err != nil {
+				t.Fatalf("SubAggregate: %v", err)
+			}
+			assertAggRows(t, results, tc.want)
+		})
 	}
 }
 
 func TestSubAggregate_MatchEmptySenderName(t *testing.T) {
 	env := newTestEnvWithEmptyBuckets(t)
 
-	filter := MessageFilter{MatchEmptySenderName: true}
+	filter := MessageFilter{EmptyValueTargets: map[ViewType]bool{ViewSenderNames: true}}
 	results, err := env.Engine.SubAggregate(env.Ctx, filter, ViewLabels, DefaultAggregateOptions())
 	if err != nil {
 		t.Fatalf("SubAggregate with MatchEmptySenderName: %v", err)
@@ -282,42 +284,6 @@ func TestSubAggregate_MatchEmptySenderName(t *testing.T) {
 		t.Errorf("expected 0 label sub-aggregates for empty sender name, got %d", len(results))
 		for _, r := range results {
 			t.Logf("  key=%q count=%d", r.Key, r.Count)
-		}
-	}
-}
-
-func TestSubAggregateByRecipient(t *testing.T) {
-	env := newTestEnv(t)
-
-	filter := MessageFilter{Sender: "alice@example.com"}
-	results, err := env.Engine.SubAggregate(env.Ctx, filter, ViewRecipients, DefaultAggregateOptions())
-	if err != nil {
-		t.Fatalf("SubAggregate: %v", err)
-	}
-
-	if len(results) != 2 {
-		t.Errorf("expected 2 recipients for alice@example.com, got %d", len(results))
-	}
-
-	assertRow(t, results, "bob@company.org", 3)
-}
-
-func TestSubAggregateByLabel(t *testing.T) {
-	env := newTestEnv(t)
-
-	filter := MessageFilter{Sender: "alice@example.com"}
-	results, err := env.Engine.SubAggregate(env.Ctx, filter, ViewLabels, DefaultAggregateOptions())
-	if err != nil {
-		t.Fatalf("SubAggregate: %v", err)
-	}
-
-	if len(results) != 3 {
-		t.Errorf("expected 3 labels for alice@example.com's messages, got %d", len(results))
-	}
-
-	for _, r := range results {
-		if r.Key == "INBOX" && r.Count != 3 {
-			t.Errorf("expected INBOX count 3, got %d", r.Count)
 		}
 	}
 }
@@ -381,10 +347,13 @@ func TestSubAggregateByTime(t *testing.T) {
 func TestAggregateByRecipientName_FallbackToEmail(t *testing.T) {
 	env := newTestEnv(t)
 
-	noNameID := env.AddParticipant(dbtest.ParticipantOpts{Email: dbtest.StrPtr("noname@test.com"), DisplayName: nil, Domain: "test.com"})
-	env.AddMessage(dbtest.MessageOpts{Subject: "No Name Recipient", SentAt: "2024-05-01 10:00:00", FromID: 1, ToIDs: []int64{noNameID}})
+	// Resolve participant IDs dynamically to avoid coupling to seed order.
+	aliceID := env.MustLookupParticipant("alice@example.com")
 
-	rows, err := env.Engine.AggregateByRecipientName(env.Ctx, DefaultAggregateOptions())
+	noNameID := env.AddParticipant(dbtest.ParticipantOpts{Email: dbtest.StrPtr("noname@test.com"), DisplayName: nil, Domain: "test.com"})
+	env.AddMessage(dbtest.MessageOpts{Subject: "No Name Recipient", SentAt: "2024-05-01 10:00:00", FromID: aliceID, ToIDs: []int64{noNameID}})
+
+	rows, err := env.Engine.Aggregate(env.Ctx, ViewRecipientNames, DefaultAggregateOptions())
 	if err != nil {
 		t.Fatalf("AggregateByRecipientName: %v", err)
 	}
@@ -395,12 +364,15 @@ func TestAggregateByRecipientName_FallbackToEmail(t *testing.T) {
 func TestAggregateByRecipientName_EmptyStringFallback(t *testing.T) {
 	env := newTestEnv(t)
 
+	// Resolve participant IDs dynamically to avoid coupling to seed order.
+	aliceID := env.MustLookupParticipant("alice@example.com")
+
 	emptyID := env.AddParticipant(dbtest.ParticipantOpts{Email: dbtest.StrPtr("empty@test.com"), DisplayName: dbtest.StrPtr(""), Domain: "test.com"})
 	spacesID := env.AddParticipant(dbtest.ParticipantOpts{Email: dbtest.StrPtr("spaces@test.com"), DisplayName: dbtest.StrPtr("   "), Domain: "test.com"})
-	env.AddMessage(dbtest.MessageOpts{Subject: "Empty Rcpt Name", SentAt: "2024-05-01 10:00:00", FromID: 1, ToIDs: []int64{emptyID}})
-	env.AddMessage(dbtest.MessageOpts{Subject: "Spaces Rcpt Name", SentAt: "2024-05-02 10:00:00", FromID: 1, CcIDs: []int64{spacesID}})
+	env.AddMessage(dbtest.MessageOpts{Subject: "Empty Rcpt Name", SentAt: "2024-05-01 10:00:00", FromID: aliceID, ToIDs: []int64{emptyID}})
+	env.AddMessage(dbtest.MessageOpts{Subject: "Spaces Rcpt Name", SentAt: "2024-05-02 10:00:00", FromID: aliceID, CcIDs: []int64{spacesID}})
 
-	rows, err := env.Engine.AggregateByRecipientName(env.Ctx, DefaultAggregateOptions())
+	rows, err := env.Engine.Aggregate(env.Ctx, ViewRecipientNames, DefaultAggregateOptions())
 	if err != nil {
 		t.Fatalf("AggregateByRecipientName: %v", err)
 	}
@@ -411,40 +383,112 @@ func TestAggregateByRecipientName_EmptyStringFallback(t *testing.T) {
 	})
 }
 
-func TestSubAggregateByRecipientName(t *testing.T) {
+// =============================================================================
+// Invalid ViewType tests
+// =============================================================================
+
+// TestSQLiteEngine_Aggregate_InvalidViewType verifies that invalid ViewType values
+// return a clear error from the Aggregate API.
+func TestSQLiteEngine_Aggregate_InvalidViewType(t *testing.T) {
 	env := newTestEnv(t)
 
-	filter := MessageFilter{Sender: "alice@example.com"}
-	results, err := env.Engine.SubAggregate(env.Ctx, filter, ViewRecipientNames, DefaultAggregateOptions())
-	if err != nil {
-		t.Fatalf("SubAggregate: %v", err)
+	tests := []struct {
+		name     string
+		viewType ViewType
+	}{
+		{name: "ViewTypeCount", viewType: ViewTypeCount},
+		{name: "NegativeValue", viewType: ViewType(-1)},
+		{name: "LargeValue", viewType: ViewType(999)},
 	}
 
-	if len(results) != 2 {
-		t.Errorf("expected 2 recipient names from alice, got %d", len(results))
-		for _, r := range results {
-			t.Logf("  key=%q count=%d", r.Key, r.Count)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := env.Engine.Aggregate(env.Ctx, tt.viewType, DefaultAggregateOptions())
+			if err == nil {
+				t.Fatal("expected error for invalid ViewType, got nil")
+			}
+			if !strings.Contains(err.Error(), "unsupported view type") {
+				t.Errorf("expected 'unsupported view type' error, got: %v", err)
+			}
+		})
 	}
 }
 
-func TestSubAggregate_RecipientName_WithRecipient(t *testing.T) {
+// TestAggregateDeterministicOrderOnTies verifies that when aggregate values tie
+// (e.g., two labels with equal counts), results are sorted deterministically by key ASC.
+// This prevents flaky tests and non-deterministic UI ordering.
+func TestAggregateDeterministicOrderOnTies(t *testing.T) {
+	tdb := dbtest.NewTestDB(t, "../store/schema.sql")
+
+	// Create minimal test data using helpers, explicitly threading IDs to avoid
+	// implicit coupling to helper defaults or auto-increment assumptions.
+	sourceID := tdb.AddSource(dbtest.SourceOpts{Identifier: "test@gmail.com", DisplayName: "Test Account"})
+	convID := tdb.AddConversation(dbtest.ConversationOpts{SourceID: sourceID, Title: "Test Thread"})
+	aliceID := tdb.AddParticipant(dbtest.ParticipantOpts{Email: dbtest.StrPtr("alice@example.com"), DisplayName: dbtest.StrPtr("Alice"), Domain: "example.com"})
+	bobID := tdb.AddParticipant(dbtest.ParticipantOpts{Email: dbtest.StrPtr("bob@example.com"), DisplayName: dbtest.StrPtr("Bob"), Domain: "example.com"})
+
+	// Create labels with names that would sort differently than insertion order
+	// "Zebra" inserted first, "Apple" inserted second - both will have count=1
+	zebraID := tdb.AddLabel(dbtest.LabelOpts{Name: "Zebra"})
+	appleID := tdb.AddLabel(dbtest.LabelOpts{Name: "Apple"})
+
+	// Add one message with both labels
+	msgID := tdb.AddMessage(dbtest.MessageOpts{
+		Subject:        "Test",
+		SentAt:         "2024-01-01 10:00:00",
+		FromID:         aliceID,
+		ToIDs:          []int64{bobID},
+		SourceID:       sourceID,
+		ConversationID: convID,
+	})
+	tdb.AddMessageLabel(msgID, zebraID)
+	tdb.AddMessageLabel(msgID, appleID)
+
+	env := &testEnv{
+		TestDB: tdb,
+		Engine: NewSQLiteEngine(tdb.DB),
+		Ctx:    context.Background(),
+	}
+
+	// Default sort is by count DESC. Both labels have count=1, so they should
+	// be ordered by key ASC as secondary sort: Apple before Zebra.
+	opts := DefaultAggregateOptions()
+	rows, err := env.Engine.Aggregate(env.Ctx, ViewLabels, opts)
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+
+	// Verify exact order: Apple (count=1) then Zebra (count=1)
+	assertAggRows(t, rows, []aggExpectation{
+		{"Apple", 1},
+		{"Zebra", 1},
+	})
+}
+
+// TestSQLiteEngine_SubAggregate_InvalidViewType verifies that invalid ViewType values
+// return a clear error from the SubAggregate API.
+func TestSQLiteEngine_SubAggregate_InvalidViewType(t *testing.T) {
 	env := newTestEnv(t)
 
-	filter := MessageFilter{
-		Recipient:     "bob@company.org",
-		RecipientName: "Bob Jones",
-	}
-	opts := AggregateOptions{Limit: 100}
-	rows, err := env.Engine.SubAggregate(env.Ctx, filter, ViewSenders, opts)
-	if err != nil {
-		t.Fatalf("SubAggregate: %v", err)
+	tests := []struct {
+		name     string
+		viewType ViewType
+	}{
+		{name: "ViewTypeCount", viewType: ViewTypeCount},
+		{name: "NegativeValue", viewType: ViewType(-1)},
+		{name: "LargeValue", viewType: ViewType(999)},
 	}
 
-	if len(rows) != 1 {
-		t.Errorf("expected 1 sender for Bob Jones, got %d", len(rows))
-	}
-	if len(rows) > 0 && rows[0].Key != "alice@example.com" {
-		t.Errorf("expected sender alice@example.com, got %s", rows[0].Key)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter := MessageFilter{Sender: "alice@example.com"}
+			_, err := env.Engine.SubAggregate(env.Ctx, filter, tt.viewType, DefaultAggregateOptions())
+			if err == nil {
+				t.Fatal("expected error for invalid ViewType, got nil")
+			}
+			if !strings.Contains(err.Error(), "unsupported view type") {
+				t.Errorf("expected 'unsupported view type' error, got: %v", err)
+			}
+		})
 	}
 }
