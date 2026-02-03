@@ -70,17 +70,19 @@ func (s *Store) MessageExistsBatch(sourceID int64, sourceMessageIDs []string) (m
 			return nil, err
 		}
 
-		for rows.Next() {
-			var sourceID string
-			var id int64
-			if err := rows.Scan(&sourceID, &id); err != nil {
-				rows.Close()
-				return nil, err
+		err = func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var sourceID string
+				var id int64
+				if err := rows.Scan(&sourceID, &id); err != nil {
+					return err
+				}
+				result[sourceID] = id
 			}
-			result[sourceID] = id
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
+			return rows.Err()
+		}()
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -315,17 +317,19 @@ func (s *Store) EnsureParticipantsBatch(addresses []mime.Address) (map[string]in
 			return nil, err
 		}
 
-		for rows.Next() {
-			var email string
-			var id int64
-			if err := rows.Scan(&email, &id); err != nil {
-				rows.Close()
-				return nil, err
+		err = func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var email string
+				var id int64
+				if err := rows.Scan(&email, &id); err != nil {
+					return err
+				}
+				result[email] = id
 			}
-			result[email] = id
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
+			return rows.Err()
+		}()
+		if err != nil {
 			return nil, err
 		}
 	}
