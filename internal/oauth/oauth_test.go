@@ -139,7 +139,7 @@ func TestTokenFileScopesRoundTrip(t *testing.T) {
 		TokenType:    "Bearer",
 	}
 
-	if err := mgr.saveToken("test@gmail.com", token); err != nil {
+	if err := mgr.saveToken("test@gmail.com", token, ScopesDeletion); err != nil {
 		t.Fatal(err)
 	}
 
@@ -200,6 +200,146 @@ func TestHasScopeMetadata(t *testing.T) {
 			got := mgr.HasScopeMetadata(tt.email)
 			if got != tt.want {
 				t.Errorf("HasScopeMetadata(%q) = %v, want %v", tt.email, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"/path/to/file", "'/path/to/file'"},
+		{"/path with spaces/file", "'/path with spaces/file'"},
+		{"/path/with'quote/file", "'/path/with'\\''quote/file'"},
+		{"simple", "'simple'"},
+		{"", "''"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := shellQuote(tt.input)
+			if got != tt.want {
+				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeEmail(t *testing.T) {
+	tests := []struct {
+		email string
+		want  string
+	}{
+		{"user@gmail.com", "user@gmail.com"},
+		{"user/slash@gmail.com", "user_slash@gmail.com"},
+		{"user\\backslash@gmail.com", "user_backslash@gmail.com"},
+		{"user..dots@gmail.com", "user_dots@gmail.com"},
+		{"../../../etc/passwd", "______etc_passwd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.email, func(t *testing.T) {
+			got := sanitizeEmail(tt.email)
+			if got != tt.want {
+				t.Errorf("sanitizeEmail(%q) = %q, want %q", tt.email, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseClientSecrets(t *testing.T) {
+	// Valid Desktop application credentials
+	validDesktop := `{
+		"installed": {
+			"client_id": "123.apps.googleusercontent.com",
+			"client_secret": "secret",
+			"auth_uri": "https://accounts.google.com/o/oauth2/auth",
+			"token_uri": "https://oauth2.googleapis.com/token",
+			"redirect_uris": ["http://localhost"]
+		}
+	}`
+
+	// Valid Web application credentials
+	validWeb := `{
+		"web": {
+			"client_id": "123.apps.googleusercontent.com",
+			"client_secret": "secret",
+			"auth_uri": "https://accounts.google.com/o/oauth2/auth",
+			"token_uri": "https://oauth2.googleapis.com/token",
+			"redirect_uris": ["http://localhost:8080/callback"]
+		}
+	}`
+
+	// TV/device client (no redirect_uris in installed)
+	tvClient := `{
+		"installed": {
+			"client_id": "123.apps.googleusercontent.com",
+			"client_secret": "secret",
+			"auth_uri": "https://accounts.google.com/o/oauth2/auth",
+			"token_uri": "https://oauth2.googleapis.com/token"
+		}
+	}`
+
+	// Web client missing redirect_uris
+	webNoRedirects := `{
+		"web": {
+			"client_id": "123.apps.googleusercontent.com",
+			"client_secret": "secret",
+			"auth_uri": "https://accounts.google.com/o/oauth2/auth",
+			"token_uri": "https://oauth2.googleapis.com/token"
+		}
+	}`
+
+	// Malformed JSON
+	malformedJSON := `{not valid json`
+
+	tests := []struct {
+		name    string
+		data    string
+		wantErr string
+	}{
+		{
+			name:    "valid desktop client",
+			data:    validDesktop,
+			wantErr: "",
+		},
+		{
+			name:    "valid web client",
+			data:    validWeb,
+			wantErr: "",
+		},
+		{
+			name:    "TV/device client rejected",
+			data:    tvClient,
+			wantErr: "missing redirect_uris",
+		},
+		{
+			name:    "web client without redirect_uris rejected",
+			data:    webNoRedirects,
+			wantErr: "missing redirect_uris",
+		},
+		{
+			name:    "malformed JSON",
+			data:    malformedJSON,
+			wantErr: "invalid character",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseClientSecrets([]byte(tt.data), Scopes)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
+				}
 			}
 		})
 	}

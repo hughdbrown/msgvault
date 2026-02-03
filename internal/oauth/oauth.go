@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -48,13 +47,13 @@ func NewManager(clientSecretsPath, tokensDir string, logger *slog.Logger) (*Mana
 // TokenSource returns a token source for the given email.
 // If a valid token exists, it will be reused and auto-refreshed.
 func (m *Manager) TokenSource(ctx context.Context, email string) (oauth2.TokenSource, error) {
-	token, err := m.loadToken(email)
+	tf, err := m.loadTokenFile(email)
 	if err != nil {
 		return nil, fmt.Errorf("no valid token for %s: %w", email, err)
 	}
 
 	// Create a token source that auto-refreshes
-	ts := m.config.TokenSource(ctx, token)
+	ts := m.config.TokenSource(ctx, &tf.Token)
 
 	// Save refreshed token if it changed
 	newToken, err := ts.Token()
@@ -62,8 +61,13 @@ func (m *Manager) TokenSource(ctx context.Context, email string) (oauth2.TokenSo
 		return nil, fmt.Errorf("refresh token: %w", err)
 	}
 
-	if newToken.AccessToken != token.AccessToken {
-		if err := m.saveToken(email, newToken); err != nil {
+	if newToken.AccessToken != tf.Token.AccessToken {
+		// Preserve the original scopes when saving refreshed token
+		scopes := tf.Scopes
+		if len(scopes) == 0 {
+			scopes = m.config.Scopes // fallback for legacy tokens
+		}
+		if err := m.saveToken(email, newToken, scopes); err != nil {
 			m.logger.Warn("failed to save refreshed token", "email", email, "error", err)
 		}
 	}
@@ -77,23 +81,63 @@ func (m *Manager) HasToken(email string) bool {
 	return err == nil
 }
 
-// Authorize performs the OAuth flow for a new account.
-// If headless is true, uses device code flow; otherwise opens browser.
-func (m *Manager) Authorize(ctx context.Context, email string, headless bool) error {
-	var token *oauth2.Token
-	var err error
+// PrintHeadlessInstructions prints setup instructions for headless servers.
+// Google's device flow does not support Gmail scopes, so users must authorize
+// on a machine with a browser and copy the token file.
+// tokensDir should be the configured tokens directory (e.g., cfg.TokensDir()).
+func PrintHeadlessInstructions(email, tokensDir string) {
+	// Use same sanitization as tokenPath for consistency
+	tokenFile := sanitizeEmail(email) + ".json"
+	tokenPath := filepath.Join(tokensDir, tokenFile)
 
-	if headless {
-		token, err = m.deviceFlow(ctx)
-	} else {
-		token, err = m.browserFlow(ctx)
-	}
+	fmt.Println()
+	fmt.Println("=== Headless Server Setup ===")
+	fmt.Println()
+	fmt.Println("Google's OAuth device flow does not support Gmail scopes, so --headless")
+	fmt.Println("cannot directly authorize. Instead, authorize on a machine with a browser")
+	fmt.Println("and copy the token to your server.")
+	fmt.Println()
+	fmt.Println("Step 1: On a machine with a browser, run:")
+	fmt.Println()
+	fmt.Printf("    msgvault add-account %s\n", email)
+	fmt.Println()
+	fmt.Println("Step 2: Copy the token file to your headless server:")
+	fmt.Println()
+	fmt.Printf("    ssh user@server mkdir -p %s\n", shellQuote(tokensDir))
+	fmt.Printf("    scp %s user@server:%s\n", shellQuote(tokenPath), shellQuote(tokenPath))
+	fmt.Println()
+	fmt.Println("Step 3: On the headless server, register the account:")
+	fmt.Println()
+	fmt.Printf("    msgvault add-account %s\n", email)
+	fmt.Println()
+	fmt.Println("The token will be detected and the account registered. No browser needed.")
+	fmt.Println("All msgvault commands (sync, tui, etc.) will work normally.")
+	fmt.Println()
+}
 
+// sanitizeEmail sanitizes an email for use in a filename.
+func sanitizeEmail(email string) string {
+	safe := strings.ReplaceAll(email, "/", "_")
+	safe = strings.ReplaceAll(safe, "\\", "_")
+	safe = strings.ReplaceAll(safe, "..", "_")
+	return safe
+}
+
+// shellQuote returns a shell-safe quoted string using single quotes.
+// Handles embedded single quotes by ending the quoted string, adding an
+// escaped single quote, and starting a new quoted string: ' -> '\”
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// Authorize performs the browser OAuth flow for a new account.
+func (m *Manager) Authorize(ctx context.Context, email string) error {
+	token, err := m.browserFlow(ctx)
 	if err != nil {
 		return err
 	}
 
-	return m.saveToken(email, token)
+	return m.saveToken(email, token, m.config.Scopes)
 }
 
 const (
@@ -168,108 +212,6 @@ func (m *Manager) browserFlow(ctx context.Context) (*oauth2.Token, error) {
 	}
 }
 
-// deviceFlow uses the device authorization grant for headless environments.
-func (m *Manager) deviceFlow(ctx context.Context) (*oauth2.Token, error) {
-	// Device flow endpoint
-	deviceEndpoint := "https://oauth2.googleapis.com/device/code"
-
-	// Request device code
-	resp, err := http.PostForm(deviceEndpoint, map[string][]string{
-		"client_id": {m.config.ClientID},
-		"scope":     {scopesToString(Scopes)},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("request device code: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var deviceResp struct {
-		DeviceCode      string `json:"device_code"`
-		UserCode        string `json:"user_code"`
-		VerificationURL string `json:"verification_url"`
-		ExpiresIn       int    `json:"expires_in"`
-		Interval        int    `json:"interval"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&deviceResp); err != nil {
-		return nil, fmt.Errorf("parse device response: %w", err)
-	}
-
-	// Display instructions to user
-	fmt.Printf("\n")
-	fmt.Printf("To authorize msgvault, visit:\n")
-	fmt.Printf("  %s\n\n", deviceResp.VerificationURL)
-	fmt.Printf("And enter code: %s\n\n", deviceResp.UserCode)
-	fmt.Printf("Waiting for authorization...\n")
-
-	// Poll for token
-	interval := time.Duration(deviceResp.Interval) * time.Second
-	if interval < 5*time.Second {
-		interval = 5 * time.Second
-	}
-
-	deadline := time.Now().Add(time.Duration(deviceResp.ExpiresIn) * time.Second)
-
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(interval):
-		}
-
-		token, err := m.pollForToken(ctx, deviceResp.DeviceCode)
-		if err == nil {
-			fmt.Printf("Authorization successful!\n")
-			return token, nil
-		}
-
-		// Check if we should continue polling
-		errStr := err.Error()
-		if errStr == "oauth error: authorization_pending" || errStr == "oauth error: slow_down" {
-			continue
-		}
-
-		return nil, err
-	}
-
-	return nil, fmt.Errorf("authorization timed out")
-}
-
-// pollForToken polls the token endpoint during device flow.
-func (m *Manager) pollForToken(ctx context.Context, deviceCode string) (*oauth2.Token, error) {
-	resp, err := http.PostForm("https://oauth2.googleapis.com/token", map[string][]string{
-		"client_id":     {m.config.ClientID},
-		"client_secret": {m.config.ClientSecret},
-		"device_code":   {deviceCode},
-		"grant_type":    {"urn:ietf:params:oauth:grant-type:device_code"},
-	})
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var tokenResp struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int    `json:"expires_in"`
-		TokenType    string `json:"token_type"`
-		Error        string `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, err
-	}
-
-	if tokenResp.Error != "" {
-		return nil, fmt.Errorf("oauth error: %s", tokenResp.Error)
-	}
-
-	return &oauth2.Token{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		TokenType:    tokenResp.TokenType,
-		Expiry:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
-	}, nil
-}
-
 // tokenFile wraps an OAuth2 token with metadata about the scopes it was
 // authorized with. This enables proactive scope checking (e.g., detecting
 // that deletion requires re-authorization) without making an API call first.
@@ -336,16 +278,15 @@ func (m *Manager) HasScope(email string, scope string) bool {
 	return false
 }
 
-// saveToken saves a token for the given email, including the scopes from
-// the manager's config.
-func (m *Manager) saveToken(email string, token *oauth2.Token) error {
+// saveToken saves a token for the given email with the specified scopes.
+func (m *Manager) saveToken(email string, token *oauth2.Token, scopes []string) error {
 	if err := os.MkdirAll(m.tokensDir, 0700); err != nil {
 		return err
 	}
 
 	tf := tokenFile{
 		Token:  *token,
-		Scopes: m.config.Scopes,
+		Scopes: scopes,
 	}
 
 	data, err := json.MarshalIndent(tf, "", "  ")
@@ -360,11 +301,7 @@ func (m *Manager) saveToken(email string, token *oauth2.Token) error {
 // tokenPath returns the path to the token file for an email.
 // The email is sanitized to prevent path traversal attacks.
 func (m *Manager) tokenPath(email string) string {
-	// Sanitize email to prevent path traversal
-	// Replace characters that could be used for path traversal
-	safe := strings.ReplaceAll(email, "/", "_")
-	safe = strings.ReplaceAll(safe, "\\", "_")
-	safe = strings.ReplaceAll(safe, "..", "_")
+	safe := sanitizeEmail(email)
 
 	// Ensure the final path is within tokensDir
 	path := filepath.Join(m.tokensDir, safe+".json")
@@ -409,7 +346,7 @@ func NewManagerWithScopes(clientSecretsPath, tokensDir string, logger *slog.Logg
 		return nil, fmt.Errorf("read client secrets: %w", err)
 	}
 
-	config, err := google.ConfigFromJSON(data, scopes...)
+	config, err := parseClientSecrets(data, scopes)
 	if err != nil {
 		return nil, fmt.Errorf("parse client secrets: %w", err)
 	}
@@ -423,6 +360,33 @@ func NewManagerWithScopes(clientSecretsPath, tokensDir string, logger *slog.Logg
 		tokensDir: tokensDir,
 		logger:    logger,
 	}, nil
+}
+
+// parseClientSecrets parses Google OAuth client secrets JSON.
+// Requires credentials with redirect_uris (Desktop app or Web app).
+// TV/device clients are not supported (device flow doesn't work with Gmail).
+func parseClientSecrets(data []byte, scopes []string) (*oauth2.Config, error) {
+	config, err := google.ConfigFromJSON(data, scopes...)
+	if err != nil {
+		// Check if it's a client missing redirect_uris (TV/device or misconfigured)
+		var secrets struct {
+			Installed *struct {
+				RedirectURIs []string `json:"redirect_uris"`
+			} `json:"installed"`
+			Web *struct {
+				RedirectURIs []string `json:"redirect_uris"`
+			} `json:"web"`
+		}
+		if json.Unmarshal(data, &secrets) == nil {
+			missingRedirects := (secrets.Installed != nil && len(secrets.Installed.RedirectURIs) == 0) ||
+				(secrets.Web != nil && len(secrets.Web.RedirectURIs) == 0)
+			if missingRedirects {
+				return nil, fmt.Errorf("OAuth client is missing redirect_uris (TV/device clients are not supported - Gmail doesn't work with device flow). Please create a 'Desktop application' or 'Web application' OAuth client in Google Cloud Console")
+			}
+		}
+		return nil, err
+	}
+	return config, nil
 }
 
 // DeleteToken removes the token file for the given email.
