@@ -1,7 +1,6 @@
 package query
 
 import (
-	"context"
 	"strings"
 	"testing"
 )
@@ -108,7 +107,7 @@ func TestSQLInjection_FilterStringsAreSafelyParameterized(t *testing.T) {
 		t.Run("Sender_"+payload[:min(20, len(payload))], func(t *testing.T) {
 			filter := MessageFilter{Sender: payload}
 			// Should not panic or cause SQL error - just return empty results
-			msgs, err := env.Engine.ListMessages(context.Background(), filter)
+			msgs, err := env.Engine.ListMessages(env.Ctx, filter)
 			if err != nil {
 				t.Errorf("unexpected error with payload %q: %v", payload, err)
 			}
@@ -120,7 +119,7 @@ func TestSQLInjection_FilterStringsAreSafelyParameterized(t *testing.T) {
 
 		t.Run("Label_"+payload[:min(20, len(payload))], func(t *testing.T) {
 			filter := MessageFilter{Label: payload}
-			msgs, err := env.Engine.ListMessages(context.Background(), filter)
+			msgs, err := env.Engine.ListMessages(env.Ctx, filter)
 			if err != nil {
 				t.Errorf("unexpected error with payload %q: %v", payload, err)
 			}
@@ -139,11 +138,4 @@ func TestSQLInjection_FilterStringsAreSafelyParameterized(t *testing.T) {
 	if count != 5 { // Standard seed data has 5 messages
 		t.Errorf("expected 5 messages in database after injection tests, got %d", count)
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
