@@ -1,16 +1,45 @@
 package sync
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/wesm/msgvault/internal/gmail"
 	"github.com/wesm/msgvault/internal/store"
 	testemail "github.com/wesm/msgvault/internal/testutil/email"
 )
+
+// panicOnBatchAPI wraps a MockAPI and panics when GetMessagesRawBatch is called.
+// Used to test that Full() recovers from panics gracefully.
+type panicOnBatchAPI struct {
+	*gmail.MockAPI
+}
+
+func (p *panicOnBatchAPI) GetMessagesRawBatch(_ context.Context, _ []string) ([]*gmail.RawMessage, error) {
+	panic("unexpected nil pointer in batch processing")
+}
+
+func TestFullSync_PanicReturnsError(t *testing.T) {
+	env := newTestEnv(t)
+	seedMessages(env, 1, 12345, "msg1")
+
+	// Replace the client with one that panics during batch fetch
+	env.Syncer = New(&panicOnBatchAPI{MockAPI: env.Mock}, env.Store, nil)
+
+	// Should return an error, NOT panic and crash the program
+	_, err := env.Syncer.Full(env.Context, testEmail)
+	if err == nil {
+		t.Fatal("expected error from panic recovery, got nil")
+	}
+	if !strings.Contains(err.Error(), "panic") {
+		t.Errorf("expected error to mention panic, got: %v", err)
+	}
+}
 
 func TestFullSync(t *testing.T) {
 	env := newTestEnv(t)

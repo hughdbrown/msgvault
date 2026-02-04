@@ -214,9 +214,9 @@ func (s *Syncer) processBatch(ctx context.Context, sourceID int64, listResp *gma
 }
 
 // Full performs a full synchronization.
-func (s *Syncer) Full(ctx context.Context, email string) (*gmail.SyncSummary, error) {
+func (s *Syncer) Full(ctx context.Context, email string) (summary *gmail.SyncSummary, err error) {
 	startTime := time.Now()
-	summary := &gmail.SyncSummary{StartTime: startTime}
+	summary = &gmail.SyncSummary{StartTime: startTime}
 
 	// Get or create source
 	source, err := s.store.GetOrCreateSource("gmail", email)
@@ -232,11 +232,12 @@ func (s *Syncer) Full(ctx context.Context, email string) (*gmail.SyncSummary, er
 	summary.WasResumed = state.wasResumed
 	summary.ResumedFromToken = state.pageToken
 
-	// Defer failure handling
+	// Defer failure handling — recover from panics and return as error
 	defer func() {
 		if r := recover(); r != nil {
 			_ = s.store.FailSync(state.syncID, fmt.Sprintf("panic: %v", r))
-			panic(r)
+			summary = nil
+			err = fmt.Errorf("sync panicked: %v", r)
 		}
 	}()
 
