@@ -1,7 +1,9 @@
 package oauth
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -290,10 +292,10 @@ func TestTokenPath_SymlinkEscape(t *testing.T) {
 		t.Errorf("tokenPath returned symlink path %q, should use hash-based fallback to prevent escape", gotPath)
 	}
 
-	// Verify the returned path, when resolved, stays within tokensDir
-	// (the hash-based fallback should be used)
-	if !strings.HasPrefix(gotPath, tokensDir) {
-		t.Errorf("tokenPath %q is not within tokensDir %q", gotPath, tokensDir)
+	// Verify the returned path is exactly the expected hash-based fallback
+	expectedPath := filepath.Join(tokensDir, fmt.Sprintf("%x.json", sha256.Sum256([]byte("evil"))))
+	if gotPath != expectedPath {
+		t.Errorf("tokenPath = %q, want hash-based fallback %q", gotPath, expectedPath)
 	}
 }
 

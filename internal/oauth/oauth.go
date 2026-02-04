@@ -308,13 +308,19 @@ func (m *Manager) tokenPath(email string) string {
 	cleanPath := filepath.Clean(path)
 	cleanTokensDir := filepath.Clean(m.tokensDir)
 
-	// Verify the path is still within tokensDir
-	if !strings.HasPrefix(cleanPath, cleanTokensDir) {
+	// Verify the path is still within tokensDir (using proper directory check
+	// to avoid prefix attacks like tokensDir-evil matching tokensDir)
+	if !hasPathPrefix(cleanPath, cleanTokensDir) {
 		// If path escapes tokensDir, use a hash-based fallback
 		return filepath.Join(m.tokensDir, fmt.Sprintf("%x.json", sha256.Sum256([]byte(email))))
 	}
 
-	// Check if path is a symlink that could escape tokensDir
+	// Check if path is a symlink that could escape tokensDir.
+	// Note: There is an inherent TOCTOU (time-of-check to time-of-use) race between
+	// this check and when the token is actually written. An attacker could create a
+	// symlink after this check passes but before the write occurs. However, exploiting
+	// this would require the attacker to have write access to the tokens directory and
+	// precise timing, making it difficult to exploit in practice.
 	if info, err := os.Lstat(cleanPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		// Path exists and is a symlink - resolve it and verify it stays within tokensDir
 		resolved, err := filepath.EvalSymlinks(cleanPath)
@@ -327,7 +333,18 @@ func (m *Manager) tokenPath(email string) string {
 	return cleanPath
 }
 
+// hasPathPrefix checks if path starts with dir using proper separator handling.
+// This prevents prefix attacks like tokensDir-evil matching tokensDir.
+// Does not resolve symlinks - use isPathWithinDir when symlink resolution is needed.
+func hasPathPrefix(path, dir string) bool {
+	cleanPath := filepath.Clean(path)
+	cleanDir := filepath.Clean(dir)
+	return strings.HasPrefix(cleanPath, cleanDir+string(filepath.Separator)) ||
+		cleanPath == cleanDir
+}
+
 // isPathWithinDir checks if path is within dir, resolving symlinks in dir.
+// Use this when checking resolved symlink targets.
 func isPathWithinDir(path, dir string) bool {
 	// Resolve symlinks in dir to get the real base directory
 	resolvedDir, err := filepath.EvalSymlinks(dir)
