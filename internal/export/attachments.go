@@ -198,13 +198,16 @@ func SanitizeFilename(s string) string {
 }
 
 // ValidateOutputPath checks that an output file path does not escape the
-// current working directory via ".." traversal. This guards against
-// email-supplied filenames being passed to --output (e.g., an attachment
-// named "../../.ssh/authorized_keys"). Absolute paths are allowed because
-// they represent an explicit user choice.
+// current working directory. This guards against email-supplied filenames
+// being passed to --output (e.g., an attachment named
+// "../../.ssh/authorized_keys" or "/etc/cron.d/evil").
+// Both absolute paths and ".." traversal are rejected.
 func ValidateOutputPath(outputPath string) error {
 	cleaned := filepath.Clean(outputPath)
-	if !filepath.IsAbs(cleaned) && strings.HasPrefix(cleaned, "..") {
+	if filepath.IsAbs(cleaned) {
+		return fmt.Errorf("output path %q is absolute; use a relative path", outputPath)
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("output path %q escapes the working directory", outputPath)
 	}
 	return nil

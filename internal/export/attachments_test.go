@@ -402,8 +402,13 @@ func TestValidateOutputPath(t *testing.T) {
 		{"simple filename", "invoice.pdf", false},
 		{"filename with dot prefix", "./invoice.pdf", false},
 		{"subdirectory", "subdir/file.pdf", false},
-		{"absolute path", "/tmp/file.pdf", false},
 		{"stdout dash", "-", false},
+		{"dot-dot prefix filename", "..backup", false},
+		{"dot-dot middle filename", "foo..bar.txt", false},
+
+		// Absolute paths (could be malicious attachment names)
+		{"absolute unix path", "/tmp/file.pdf", true},
+		{"absolute path with traversal", "/etc/cron.d/evil", true},
 
 		// Path traversal attacks (e.g., from email-supplied filenames)
 		{"parent traversal", "../evil.txt", true},
