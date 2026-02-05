@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -395,17 +396,37 @@ func scopesToString(scopes []string) string {
 	return strings.Join(scopes, " ")
 }
 
+// validateBrowserURL checks that rawURL is a valid http or https URL.
+// Returns an error for invalid URLs or disallowed schemes.
+func validateBrowserURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("refused to open URL with scheme %q: only http and https are allowed", parsed.Scheme)
+	}
+	return nil
+}
+
 // openBrowser opens the default browser to the given URL.
-func openBrowser(url string) error {
+// Only http and https URLs are allowed to prevent command injection
+// via dangerous URL schemes (e.g., file://, custom protocol handlers).
+func openBrowser(rawURL string) error {
+	if err := validateBrowserURL(rawURL); err != nil {
+		return err
+	}
+
 	var cmd *exec.Cmd
 
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", rawURL)
 	case "linux":
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", rawURL)
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
 	default:
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
