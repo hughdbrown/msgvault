@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/wesm/msgvault/internal/fileutil"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
@@ -281,7 +282,7 @@ func (m *Manager) HasScope(email string, scope string) bool {
 
 // saveToken saves a token for the given email with the specified scopes.
 func (m *Manager) saveToken(email string, token *oauth2.Token, scopes []string) error {
-	if err := os.MkdirAll(m.tokensDir, 0700); err != nil {
+	if err := fileutil.SecureMkdirAll(m.tokensDir, 0700); err != nil {
 		return err
 	}
 
@@ -315,7 +316,7 @@ func (m *Manager) saveToken(email string, token *oauth2.Token, scopes []string) 
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp token file: %w", err)
 	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
+	if err := fileutil.SecureChmod(tmpPath, 0600); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp token file: %w", err)
 	}

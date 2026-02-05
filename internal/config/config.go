@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/wesm/msgvault/internal/fileutil"
 )
 
 // Config represents the msgvault configuration.
@@ -142,7 +143,7 @@ func (c *Config) AnalyticsDir() string {
 
 // EnsureHomeDir creates the msgvault home directory if it doesn't exist.
 func (c *Config) EnsureHomeDir() error {
-	return os.MkdirAll(c.HomeDir, 0700)
+	return fileutil.SecureMkdirAll(c.HomeDir, 0700)
 }
 
 // ConfigFilePath returns the path to the config file.
@@ -186,7 +187,7 @@ func MkTempDir(pattern string, preferredDirs ...string) (string, error) {
 
 	// Fallback: use ~/.msgvault/tmp/
 	fallbackBase := filepath.Join(DefaultHome(), "tmp")
-	if err := os.MkdirAll(fallbackBase, 0700); err != nil {
+	if err := fileutil.SecureMkdirAll(fallbackBase, 0700); err != nil {
 		return "", fmt.Errorf("create temp dir: %w (fallback also failed: %v)", sysErr, err)
 	}
 	dir, err := os.MkdirTemp(fallbackBase, pattern)

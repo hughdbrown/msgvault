@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/wesm/msgvault/internal/fileutil"
 )
 
 // Status represents the state of a deletion batch.
@@ -151,7 +153,7 @@ func (m *Manifest) Save(path string) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0600)
+	return fileutil.SecureWriteFile(path, data, 0600)
 }
 
 // FormatSummary returns a human-readable summary of the deletion.
