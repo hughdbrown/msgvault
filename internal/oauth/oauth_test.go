@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -165,6 +166,37 @@ func TestTokenFileScopesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveToken_OverwriteExisting(t *testing.T) {
+	mgr := setupTestManager(t, Scopes)
+
+	token1 := &oauth2.Token{
+		AccessToken:  "first",
+		RefreshToken: "refresh1",
+		TokenType:    "Bearer",
+	}
+	if err := mgr.saveToken("test@gmail.com", token1, Scopes); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save again with a different access token — must overwrite (not fail).
+	token2 := &oauth2.Token{
+		AccessToken:  "second",
+		RefreshToken: "refresh2",
+		TokenType:    "Bearer",
+	}
+	if err := mgr.saveToken("test@gmail.com", token2, Scopes); err != nil {
+		t.Fatalf("second saveToken should overwrite existing file: %v", err)
+	}
+
+	loaded, err := mgr.loadToken("test@gmail.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AccessToken != "second" {
+		t.Errorf("expected access token 'second' after overwrite, got %q", loaded.AccessToken)
+	}
+}
+
 func TestHasScope_LegacyToken(t *testing.T) {
 	mgr := setupTestManager(t, Scopes)
 
@@ -296,6 +328,54 @@ func TestTokenPath_SymlinkEscape(t *testing.T) {
 	expectedPath := filepath.Join(tokensDir, fmt.Sprintf("%x.json", sha256.Sum256([]byte("evil"))))
 	if gotPath != expectedPath {
 		t.Errorf("tokenPath = %q, want hash-based fallback %q", gotPath, expectedPath)
+	}
+}
+
+func TestHasPathPrefix(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		dir  string
+		want bool
+	}{
+		{"child path", "/a/b/c", "/a/b", true},
+		{"exact match", "/a/b", "/a/b", true},
+		{"prefix attack", "/a/b-evil/c", "/a/b", false},
+		{"sibling", "/a/c", "/a/b", false},
+		{"parent escape", "/a", "/a/b", false},
+		{"root dir child", "/foo", "/", true},
+		{"root dir exact", "/", "/", true},
+		{"unrelated", "/x/y", "/a/b", false},
+		{"dotdot prefix child", "/a/b/..backup", "/a/b", true},
+	}
+
+	// Add Windows drive-root cases when running on Windows.
+	if runtime.GOOS == "windows" {
+		vol := filepath.VolumeName(os.TempDir())
+		root := vol + string(filepath.Separator)
+		tests = append(tests,
+			struct {
+				name string
+				path string
+				dir  string
+				want bool
+			}{"windows drive root exact", root, root, true},
+			struct {
+				name string
+				path string
+				dir  string
+				want bool
+			}{"windows drive root child", root + "Users", root, true},
+		)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasPathPrefix(tt.path, tt.dir)
+			if got != tt.want {
+				t.Errorf("hasPathPrefix(%q, %q) = %v, want %v", tt.path, tt.dir, got, tt.want)
+			}
+		})
 	}
 }
 
