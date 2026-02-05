@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/wesm/msgvault/internal/fileutil"
 	"github.com/wesm/msgvault/internal/gmail"
 	"github.com/wesm/msgvault/internal/mime"
 	"github.com/wesm/msgvault/internal/store"
@@ -625,7 +626,7 @@ func (s *Syncer) storeAttachment(messageID int64, att *mime.Attachment) error {
 
 	// Write file if it doesn't exist (deduplication)
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		if err := os.WriteFile(fullPath, att.Content, 0600); err != nil {
+		if err := fileutil.SecureWriteFile(fullPath, att.Content, 0600); err != nil {
 			return err
 		}
 	}

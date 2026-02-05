@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/wesm/msgvault/internal/config"
+	"github.com/wesm/msgvault/internal/fileutil"
 	"golang.org/x/mod/semver"
 )
 
@@ -646,8 +647,8 @@ func saveCache(version string) {
 		return
 	}
 	cachePath := filepath.Join(getCacheDir(), cacheFileName)
-	os.MkdirAll(filepath.Dir(cachePath), 0755) //nolint:errcheck
-	os.WriteFile(cachePath, data, 0600)        //nolint:errcheck
+	os.MkdirAll(filepath.Dir(cachePath), 0755)      //nolint:errcheck
+	fileutil.SecureWriteFile(cachePath, data, 0600) //nolint:errcheck
 }
 
 // extractBaseSemver extracts the base semver from a version string.

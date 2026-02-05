@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/wesm/msgvault/internal/fileutil"
+
 	"github.com/wesm/msgvault/internal/query"
 )
 
@@ -322,7 +324,7 @@ func exportAttachmentToFile(outputDir, attachmentsDir, contentHash, filename str
 // trying path, path_1, path_2, etc. on conflict. Returns the open file and
 // the path that was actually used. Uses O_CREATE|O_EXCL to avoid TOCTOU races.
 func CreateExclusiveFile(p string, perm os.FileMode) (*os.File, string, error) {
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	f, err := fileutil.SecureOpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err == nil {
 		return f, p, nil
 	}
@@ -333,7 +335,7 @@ func CreateExclusiveFile(p string, perm os.FileMode) (*os.File, string, error) {
 	base := p[:len(p)-len(ext)]
 	for i := 1; ; i++ {
 		candidate := fmt.Sprintf("%s_%d%s", base, i, ext)
-		f, err = os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+		f, err = fileutil.SecureOpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 		if err == nil {
 			return f, candidate, nil
 		}

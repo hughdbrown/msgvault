@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wesm/msgvault/internal/export"
+	"github.com/wesm/msgvault/internal/fileutil"
 )
 
 var (
@@ -133,7 +134,7 @@ func exportAttachmentBinary(storagePath, contentHash string) error {
 		return err
 	}
 
-	dst, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	dst, err := fileutil.SecureOpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("create output file: %w", err)
 	}
