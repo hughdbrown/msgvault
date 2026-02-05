@@ -34,7 +34,7 @@ func restrictToCurrentUser(path string) error {
 
 	// For directories, enable inheritance so children get the same restriction.
 	// For files, NO_INHERITANCE is correct (files don't have children).
-	inherit := windows.NO_INHERITANCE
+	var inherit uint32 = windows.NO_INHERITANCE
 	info, statErr := os.Stat(path)
 	if statErr == nil && info.IsDir() {
 		inherit = windows.CONTAINER_INHERIT_ACE | windows.OBJECT_INHERIT_ACE
