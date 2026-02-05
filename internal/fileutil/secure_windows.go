@@ -139,8 +139,10 @@ func SecureChmod(path string, perm os.FileMode) error {
 }
 
 // SecureOpenFile opens the named file with specified flag and permissions.
-// For owner-only modes on newly created files, a DACL restricting access to
-// the current user is applied.
+// For owner-only modes when O_CREATE is set, a DACL restricting access to
+// the current user is applied — regardless of whether the file already existed.
+// This is intentional: all callers write sensitive data (email content,
+// attachments) that should be owner-only.
 //
 // Note: on Windows there is a small TOCTOU window between file creation and
 // DACL application because SetNamedSecurityInfo operates by path after the

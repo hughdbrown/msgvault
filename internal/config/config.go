@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,6 +176,7 @@ func MkTempDir(pattern string, preferredDirs ...string) (string, error) {
 		}
 		dir, err := os.MkdirTemp(base, pattern)
 		if err == nil {
+			secureTempDir(dir)
 			return dir, nil
 		}
 	}
@@ -182,6 +184,7 @@ func MkTempDir(pattern string, preferredDirs ...string) (string, error) {
 	// Try system temp dir
 	dir, sysErr := os.MkdirTemp("", pattern)
 	if sysErr == nil {
+		secureTempDir(dir)
 		return dir, nil
 	}
 
@@ -194,13 +197,17 @@ func MkTempDir(pattern string, preferredDirs ...string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create temp dir: %w (fallback also failed: %v)", sysErr, err)
 	}
-	// os.MkdirTemp uses default permissions; secure the new directory.
-	// On Windows, this sets an owner-only DACL; on Unix, it enforces 0700.
-	if chErr := fileutil.SecureChmod(dir, 0700); chErr != nil {
-		// Non-fatal: the directory was created, just not hardened
-		_ = chErr
-	}
+	secureTempDir(dir)
 	return dir, nil
+}
+
+// secureTempDir applies owner-only permissions to a temp directory created by
+// os.MkdirTemp, which uses default permissions. On Windows, this also sets an
+// owner-only DACL. Failures are logged but non-fatal.
+func secureTempDir(dir string) {
+	if err := fileutil.SecureChmod(dir, 0700); err != nil {
+		slog.Warn("failed to secure temp directory permissions", "path", dir, "err", err)
+	}
 }
 
 // resolveRelative makes a relative path absolute by joining it with base.

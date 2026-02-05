@@ -27,7 +27,7 @@ func SecureChmod(path string, perm os.FileMode) error {
 }
 
 // SecureOpenFile opens the named file with specified flag and permissions.
-// On Windows, owner-only modes get a restrictive DACL after creation.
+// On Windows, owner-only modes with O_CREATE get a restrictive DACL.
 func SecureOpenFile(path string, flag int, perm os.FileMode) (*os.File, error) {
 	return os.OpenFile(path, flag, perm)
 }

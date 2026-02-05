@@ -344,6 +344,23 @@ func TestDefaultHomeExpandsTilde(t *testing.T) {
 	}
 }
 
+// assertTempDirSecured checks that a temp dir has permissions no more
+// permissive than 0700. This is umask-tolerant (stricter is fine).
+func assertTempDirSecured(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return // Windows uses DACLs, not Unix permission bits
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("Stat temp dir: %v", err)
+	}
+	got := info.Mode().Perm()
+	if got&^os.FileMode(0700) != 0 {
+		t.Errorf("temp dir perm = %04o, has bits beyond 0700 (extra: %04o)", got, got&^0700)
+	}
+}
+
 func TestMkTempDir(t *testing.T) {
 	t.Run("uses system temp when no preferred dirs", func(t *testing.T) {
 		dir, err := MkTempDir("test-*")
@@ -355,6 +372,7 @@ func TestMkTempDir(t *testing.T) {
 		if _, err := os.Stat(dir); err != nil {
 			t.Errorf("temp dir does not exist: %v", err)
 		}
+		assertTempDirSecured(t, dir)
 	})
 
 	t.Run("uses preferred dir when available", func(t *testing.T) {
@@ -368,6 +386,7 @@ func TestMkTempDir(t *testing.T) {
 		if !strings.HasPrefix(dir, preferred) {
 			t.Errorf("temp dir %q not under preferred %q", dir, preferred)
 		}
+		assertTempDirSecured(t, dir)
 	})
 
 	t.Run("skips empty preferred dir strings", func(t *testing.T) {
@@ -433,13 +452,8 @@ func TestMkTempDir(t *testing.T) {
 		}
 
 		// Verify the tmp dir was created with restrictive permissions
-		info, err := os.Stat(expectedBase)
-		if err != nil {
-			t.Fatalf("stat fallback dir: %v", err)
-		}
-		if perm := info.Mode().Perm(); perm != 0o700 {
-			t.Errorf("fallback dir permissions = %04o, want 0700", perm)
-		}
+		assertTempDirSecured(t, expectedBase)
+		assertTempDirSecured(t, dir)
 	})
 }
 
