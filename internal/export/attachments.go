@@ -212,6 +212,11 @@ func ValidateOutputPath(outputPath string) error {
 	if filepath.VolumeName(cleaned) != "" {
 		return fmt.Errorf("output path %q contains a drive or UNC prefix; use a relative path", outputPath)
 	}
+	// Reject rooted paths (leading / or \) which are drive-relative on Windows
+	// and absolute on Unix. filepath.IsAbs misses these on Windows.
+	if len(cleaned) > 0 && (cleaned[0] == '/' || cleaned[0] == '\\') {
+		return fmt.Errorf("output path %q is rooted; use a relative path", outputPath)
+	}
 	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("output path %q escapes the working directory", outputPath)
 	}

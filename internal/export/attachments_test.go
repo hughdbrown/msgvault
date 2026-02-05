@@ -406,9 +406,10 @@ func TestValidateOutputPath(t *testing.T) {
 		{"dot-dot prefix filename", "..backup", false},
 		{"dot-dot middle filename", "foo..bar.txt", false},
 
-		// Absolute paths (could be malicious attachment names)
+		// Rooted/absolute paths (could be malicious attachment names)
 		{"absolute unix path", "/tmp/file.pdf", true},
 		{"absolute path with traversal", "/etc/cron.d/evil", true},
+		{"backslash rooted path", `\tmp\file.pdf`, true},
 
 		// Path traversal attacks (e.g., from email-supplied filenames)
 		{"parent traversal", "../evil.txt", true},
