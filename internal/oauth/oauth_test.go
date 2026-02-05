@@ -1,7 +1,9 @@
 package oauth
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -246,6 +248,54 @@ func TestSanitizeEmail(t *testing.T) {
 				t.Errorf("sanitizeEmail(%q) = %q, want %q", tt.email, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTokenPath_SymlinkEscape(t *testing.T) {
+	// This test verifies that symlinks inside tokensDir cannot be used
+	// to write tokens outside the tokens directory.
+	//
+	// Attack scenario:
+	// 1. Attacker creates symlink: tokensDir/evil.json -> /tmp/outside/evil.json
+	// 2. saveToken("evil", ...) would follow the symlink and write outside tokensDir
+	// 3. The fix should detect this and use a hash-based fallback path
+
+	dir := t.TempDir()
+	tokensDir := filepath.Join(dir, "tokens")
+	outsideDir := filepath.Join(dir, "outside")
+
+	if err := os.MkdirAll(tokensDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a symlink inside tokensDir that points outside
+	symlinkPath := filepath.Join(tokensDir, "evil.json")
+	outsideTarget := filepath.Join(outsideDir, "evil.json")
+	if err := os.Symlink(outsideTarget, symlinkPath); err != nil {
+		t.Skipf("cannot create symlink (may require admin on Windows): %v", err)
+	}
+
+	mgr := &Manager{
+		config:    &oauth2.Config{Scopes: Scopes},
+		tokensDir: tokensDir,
+	}
+
+	// Get the token path for "evil" - this should NOT return the symlink path
+	// because following it would write outside tokensDir
+	gotPath := mgr.tokenPath("evil")
+
+	// The path should NOT be the symlink (which would write outside tokensDir)
+	if gotPath == symlinkPath {
+		t.Errorf("tokenPath returned symlink path %q, should use hash-based fallback to prevent escape", gotPath)
+	}
+
+	// Verify the returned path is exactly the expected hash-based fallback
+	expectedPath := filepath.Join(tokensDir, fmt.Sprintf("%x.json", sha256.Sum256([]byte("evil"))))
+	if gotPath != expectedPath {
+		t.Errorf("tokenPath = %q, want hash-based fallback %q", gotPath, expectedPath)
 	}
 }
 

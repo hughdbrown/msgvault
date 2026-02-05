@@ -306,14 +306,59 @@ func (m *Manager) tokenPath(email string) string {
 	// Ensure the final path is within tokensDir
 	path := filepath.Join(m.tokensDir, safe+".json")
 	cleanPath := filepath.Clean(path)
+	cleanTokensDir := filepath.Clean(m.tokensDir)
 
-	// Verify the path is still within tokensDir
-	if !strings.HasPrefix(cleanPath, filepath.Clean(m.tokensDir)) {
+	// Verify the path is still within tokensDir (using proper directory check
+	// to avoid prefix attacks like tokensDir-evil matching tokensDir)
+	if !hasPathPrefix(cleanPath, cleanTokensDir) {
 		// If path escapes tokensDir, use a hash-based fallback
 		return filepath.Join(m.tokensDir, fmt.Sprintf("%x.json", sha256.Sum256([]byte(email))))
 	}
 
+	// Check if path is a symlink that could escape tokensDir.
+	// Note: There is an inherent TOCTOU (time-of-check to time-of-use) race between
+	// this check and when the token is actually written. An attacker could create a
+	// symlink after this check passes but before the write occurs. However, exploiting
+	// this would require the attacker to have write access to the tokens directory and
+	// precise timing, making it difficult to exploit in practice.
+	if info, err := os.Lstat(cleanPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		// Path exists and is a symlink - resolve it and verify it stays within tokensDir
+		resolved, err := filepath.EvalSymlinks(cleanPath)
+		if err != nil || !isPathWithinDir(resolved, cleanTokensDir) {
+			// Symlink resolution failed or escapes tokensDir - use hash-based fallback
+			return filepath.Join(m.tokensDir, fmt.Sprintf("%x.json", sha256.Sum256([]byte(email))))
+		}
+	}
+
 	return cleanPath
+}
+
+// hasPathPrefix checks if path starts with dir using proper separator handling.
+// This prevents prefix attacks like tokensDir-evil matching tokensDir.
+// Does not resolve symlinks - use isPathWithinDir when symlink resolution is needed.
+func hasPathPrefix(path, dir string) bool {
+	cleanPath := filepath.Clean(path)
+	cleanDir := filepath.Clean(dir)
+	return strings.HasPrefix(cleanPath, cleanDir+string(filepath.Separator)) ||
+		cleanPath == cleanDir
+}
+
+// isPathWithinDir checks if path is within dir, resolving symlinks in dir.
+// Use this when checking resolved symlink targets.
+func isPathWithinDir(path, dir string) bool {
+	// Resolve symlinks in dir to get the real base directory
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		resolvedDir = dir // fallback to original if dir doesn't exist yet
+	}
+	resolvedDir = filepath.Clean(resolvedDir)
+
+	// Clean and check the path
+	cleanPath := filepath.Clean(path)
+
+	// Ensure path is within dir (with proper separator handling)
+	return strings.HasPrefix(cleanPath, resolvedDir+string(filepath.Separator)) ||
+		cleanPath == resolvedDir
 }
 
 // scopesToString joins scopes with spaces.
