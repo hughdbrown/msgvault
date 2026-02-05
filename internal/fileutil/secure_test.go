@@ -7,6 +7,21 @@ import (
 	"testing"
 )
 
+// assertPermNoMoreThan checks that the file at path has permissions no more
+// permissive than want. This is umask-tolerant: a umask of 0077 turning 0644
+// into 0600 is fine, but 0644 appearing as 0666 would fail.
+func assertPermNoMoreThan(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	got := info.Mode().Perm()
+	if got&^want != 0 {
+		t.Errorf("perm = %04o, has bits beyond %04o (extra: %04o)", got, want, got&^want)
+	}
+}
+
 func TestSecureWriteFile(t *testing.T) {
 	tests := []struct {
 		name string
@@ -34,13 +49,7 @@ func TestSecureWriteFile(t *testing.T) {
 			}
 
 			if runtime.GOOS != "windows" {
-				info, err := os.Stat(path)
-				if err != nil {
-					t.Fatalf("Stat: %v", err)
-				}
-				if got := info.Mode().Perm(); got != tt.perm {
-					t.Errorf("perm = %04o, want %04o", got, tt.perm)
-				}
+				assertPermNoMoreThan(t, path, tt.perm)
 			}
 		})
 	}
@@ -72,9 +81,7 @@ func TestSecureMkdirAll(t *testing.T) {
 			}
 
 			if runtime.GOOS != "windows" {
-				if got := info.Mode().Perm(); got != tt.perm {
-					t.Errorf("perm = %04o, want %04o", got, tt.perm)
-				}
+				assertPermNoMoreThan(t, path, tt.perm)
 			}
 		})
 	}
@@ -93,6 +100,7 @@ func TestSecureChmod(t *testing.T) {
 	}
 
 	if runtime.GOOS != "windows" {
+		// Chmod sets exact mode (not subject to umask), so we can assert exactly.
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatalf("Stat: %v", err)
@@ -137,13 +145,7 @@ func TestSecureOpenFile(t *testing.T) {
 			}
 
 			if runtime.GOOS != "windows" {
-				info, err := os.Stat(path)
-				if err != nil {
-					t.Fatalf("Stat: %v", err)
-				}
-				if got := info.Mode().Perm(); got != tt.perm {
-					t.Errorf("perm = %04o, want %04o", got, tt.perm)
-				}
+				assertPermNoMoreThan(t, path, tt.perm)
 			}
 		})
 	}

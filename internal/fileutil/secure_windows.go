@@ -17,9 +17,11 @@ func isOwnerOnly(perm os.FileMode) bool {
 }
 
 // restrictToCurrentUser sets a DACL on path that grants GENERIC_ALL only to
-// the current user and blocks inherited ACEs. Errors are returned to the
-// caller; the file was already created with the requested Unix mode, so
-// callers may treat DACL failures as non-fatal warnings.
+// the current user and blocks inherited ACEs. For directories, the DACL
+// includes CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE so that child files
+// and subdirectories automatically inherit the restriction. Errors are
+// returned to the caller; the file was already created with the requested
+// Unix mode, so callers may treat DACL failures as non-fatal warnings.
 func restrictToCurrentUser(path string) error {
 	token := windows.GetCurrentProcessToken()
 
@@ -30,11 +32,19 @@ func restrictToCurrentUser(path string) error {
 
 	trustee := windows.TrusteeValueFromSID(user.User.Sid)
 
+	// For directories, enable inheritance so children get the same restriction.
+	// For files, NO_INHERITANCE is correct (files don't have children).
+	inherit := windows.NO_INHERITANCE
+	info, statErr := os.Stat(path)
+	if statErr == nil && info.IsDir() {
+		inherit = windows.CONTAINER_INHERIT_ACE | windows.OBJECT_INHERIT_ACE
+	}
+
 	ea := []windows.EXPLICIT_ACCESS{
 		{
 			AccessPermissions: windows.GENERIC_ALL,
 			AccessMode:        windows.SET_ACCESS,
-			Inheritance:       windows.NO_INHERITANCE,
+			Inheritance:       inherit,
 			Trustee: windows.TRUSTEE{
 				TrusteeForm:  windows.TRUSTEE_IS_SID,
 				TrusteeType:  windows.TRUSTEE_IS_USER,
@@ -53,10 +63,10 @@ func restrictToCurrentUser(path string) error {
 		path,
 		windows.SE_FILE_OBJECT,
 		windows.SECURITY_INFORMATION(secInfo),
-		nil,  // owner SID (unchanged)
-		nil,  // group SID (unchanged)
-		acl,  // DACL
-		nil,  // SACL (unchanged)
+		nil, // owner SID (unchanged)
+		nil, // group SID (unchanged)
+		acl, // DACL
+		nil, // SACL (unchanged)
 	)
 	if err != nil {
 		return fmt.Errorf("fileutil: set DACL on %s: %w", path, err)

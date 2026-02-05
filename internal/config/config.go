@@ -194,6 +194,12 @@ func MkTempDir(pattern string, preferredDirs ...string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create temp dir: %w (fallback also failed: %v)", sysErr, err)
 	}
+	// os.MkdirTemp uses default permissions; secure the new directory.
+	// On Windows, this sets an owner-only DACL; on Unix, it enforces 0700.
+	if chErr := fileutil.SecureChmod(dir, 0700); chErr != nil {
+		// Non-fatal: the directory was created, just not hardened
+		_ = chErr
+	}
 	return dir, nil
 }
 
