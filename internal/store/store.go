@@ -175,6 +175,11 @@ func (s *Store) Rebind(query string) string {
 	return query
 }
 
+// FTS5Available returns whether FTS5 full-text search is available.
+func (s *Store) FTS5Available() bool {
+	return s.fts5Available
+}
+
 // InitSchema initializes the database schema.
 // This creates all tables if they don't exist.
 func (s *Store) InitSchema() error {
@@ -206,6 +211,27 @@ func (s *Store) InitSchema() error {
 	}
 
 	return nil
+}
+
+// NeedsFTSBackfill reports whether the FTS table needs to be populated.
+// Uses MAX(id) comparisons (instant B-tree lookups) instead of COUNT(*)
+// to avoid full table scans on large databases.
+func (s *Store) NeedsFTSBackfill() bool {
+	if !s.fts5Available {
+		return false
+	}
+	var msgMax int64
+	if err := s.db.QueryRow("SELECT COALESCE(MAX(id), 0) FROM messages").Scan(&msgMax); err != nil || msgMax == 0 {
+		return false
+	}
+	var ftsMax int64
+	if err := s.db.QueryRow("SELECT COALESCE(MAX(rowid), 0) FROM messages_fts").Scan(&ftsMax); err != nil {
+		return false
+	}
+	// Backfill needed if FTS hasn't reached near the end of the messages table.
+	// Using subtraction (msgMax - msgMax/10) instead of multiplication (msgMax*9/10)
+	// ensures the threshold is at least msgMax for small values (e.g., msgMax=1).
+	return ftsMax < msgMax-msgMax/10
 }
 
 // Stats holds database statistics.

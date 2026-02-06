@@ -58,6 +58,8 @@ Examples:
 			return fmt.Errorf("empty search query")
 		}
 
+		fmt.Fprintf(os.Stderr, "Searching...")
+
 		// Open database
 		dbPath := cfg.DatabaseDSN()
 		s, err := store.Open(dbPath)
@@ -66,11 +68,18 @@ Examples:
 		}
 		defer s.Close()
 
-		// Create query engine
-		engine := query.NewSQLiteEngine(s.DB())
+		// Ensure schema is up to date and FTS index is populated
+		if err := s.InitSchema(); err != nil {
+			return fmt.Errorf("init schema: %w", err)
+		}
+		if err := ensureFTSIndex(s); err != nil {
+			return err
+		}
 
-		// Execute search
+		// Create query engine and execute search
+		engine := query.NewSQLiteEngine(s.DB())
 		results, err := engine.Search(cmd.Context(), q, searchLimit, searchOffset)
+		fmt.Fprintf(os.Stderr, "\r            \r")
 		if err != nil {
 			return fmt.Errorf("search: %w", err)
 		}
@@ -153,6 +162,35 @@ func init() {
 	searchCmd.Flags().IntVarP(&searchLimit, "limit", "n", 50, "Maximum number of results")
 	searchCmd.Flags().IntVar(&searchOffset, "offset", 0, "Skip first N results")
 	searchCmd.Flags().BoolVar(&searchJSON, "json", false, "Output as JSON")
+}
+
+// ensureFTSIndex checks if the FTS search index needs to be built and
+// runs a one-time backfill if so. Shows a live progress bar since this
+// can take a while on large archives. Blocks until complete.
+func ensureFTSIndex(s *store.Store) error {
+	if !s.NeedsFTSBackfill() {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "Building search index (one-time)...\n")
+	n, err := s.BackfillFTS(func(done, total int64) {
+		if total <= 0 {
+			return
+		}
+		if done > total {
+			done = total
+		}
+		pct := int(done * 100 / total)
+		barWidth := 30
+		filled := barWidth * pct / 100
+		bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+		fmt.Fprintf(os.Stderr, "\r  [%s] %3d%%", bar, pct)
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr)
+		return fmt.Errorf("build search index: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "\r  [%s] 100%%  %d messages indexed.\n", strings.Repeat("=", 30), n)
+	return nil
 }
 
 // Common flag variables used across aggregate commands
