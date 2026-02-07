@@ -95,8 +95,8 @@ func errOAuthNotConfigured() error {
 // wrapOAuthError wraps an oauth/client-secrets error with setup instructions
 // if the root cause is a missing or unreadable secrets file.
 func wrapOAuthError(err error) error {
-	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("OAuth client secrets file not found.%s", oauthSetupHint())
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("OAuth client secrets file not accessible.%s", oauthSetupHint())
 	}
 	return err
 }

@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,11 +14,61 @@ import (
 	"github.com/wesm/msgvault/internal/fileutil"
 )
 
+// ChatConfig holds chat/LLM configuration.
+type ChatConfig struct {
+	Server     string `toml:"server"`      // Ollama server URL
+	Model      string `toml:"model"`       // Model name
+	MaxResults int    `toml:"max_results"` // Top-K messages to retrieve
+}
+
+// ServerConfig holds HTTP API server configuration.
+type ServerConfig struct {
+	APIPort         int      `toml:"api_port"`         // HTTP server port (default: 8080)
+	BindAddr        string   `toml:"bind_addr"`        // Bind address (default: 127.0.0.1)
+	APIKey          string   `toml:"api_key"`          // API authentication key
+	MCPEnabled      bool     `toml:"mcp_enabled"`      // Enable MCP server endpoint
+	AllowInsecure   bool     `toml:"allow_insecure"`   // Allow unauthenticated non-loopback access
+	CORSOrigins     []string `toml:"cors_origins"`     // Allowed CORS origins (empty = disabled)
+	CORSCredentials bool     `toml:"cors_credentials"` // Allow credentials in CORS
+	CORSMaxAge      int      `toml:"cors_max_age"`     // Preflight cache duration in seconds (default: 86400)
+}
+
+// IsLoopback returns true if the bind address is a loopback address.
+// Handles the full 127.0.0.0/8 range, IPv6 ::1, and "localhost".
+func (s ServerConfig) IsLoopback() bool {
+	addr := s.BindAddr
+	if addr == "" || addr == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(addr)
+	return ip != nil && ip.IsLoopback()
+}
+
+// ValidateSecure returns an error if the server is configured insecurely
+// without an explicit opt-in via allow_insecure.
+func (s ServerConfig) ValidateSecure() error {
+	if !s.IsLoopback() && s.APIKey == "" && !s.AllowInsecure {
+		return fmt.Errorf("refusing to start: bind address %q is not loopback and no api_key is set\n\n"+
+			"Set [server] api_key in config.toml, or set allow_insecure = true to override", s.BindAddr)
+	}
+	return nil
+}
+
+// AccountSchedule defines sync schedule for a single account.
+type AccountSchedule struct {
+	Email    string `toml:"email"`    // Gmail account email
+	Schedule string `toml:"schedule"` // Cron expression (e.g., "0 2 * * *" for 2am daily)
+	Enabled  bool   `toml:"enabled"`  // Whether scheduled sync is active
+}
+
 // Config represents the msgvault configuration.
 type Config struct {
-	Data  DataConfig  `toml:"data"`
-	OAuth OAuthConfig `toml:"oauth"`
-	Sync  SyncConfig  `toml:"sync"`
+	Data     DataConfig        `toml:"data"`
+	OAuth    OAuthConfig       `toml:"oauth"`
+	Sync     SyncConfig        `toml:"sync"`
+	Chat     ChatConfig        `toml:"chat"`
+	Server   ServerConfig      `toml:"server"`
+	Accounts []AccountSchedule `toml:"accounts"`
 
 	// Computed paths (not from config file)
 	HomeDir    string `toml:"-"`
@@ -64,6 +115,17 @@ func NewDefaultConfig() *Config {
 		Sync: SyncConfig{
 			RateLimitQPS: 5,
 		},
+		Chat: ChatConfig{
+			Server:     "http://localhost:11434",
+			Model:      "gpt-oss-128k",
+			MaxResults: 20,
+		},
+		Server: ServerConfig{
+			APIPort:    8080,
+			BindAddr:   "127.0.0.1",
+			MCPEnabled: false,
+		},
+		Accounts: []AccountSchedule{},
 	}
 }
 
@@ -172,6 +234,30 @@ func (c *Config) ConfigFilePath() string {
 		return c.configPath
 	}
 	return filepath.Join(c.HomeDir, "config.toml")
+}
+
+// ScheduledAccounts returns accounts with scheduling enabled.
+func (c *Config) ScheduledAccounts() []AccountSchedule {
+	var scheduled []AccountSchedule
+	for _, acc := range c.Accounts {
+		if acc.Enabled && acc.Schedule != "" {
+			scheduled = append(scheduled, acc)
+		}
+	}
+	return scheduled
+}
+
+// GetAccountSchedule returns the schedule for a specific account email.
+// Returns nil if the account is not configured for scheduling.
+// The returned value is a copy, so mutations won't affect the config.
+func (c *Config) GetAccountSchedule(email string) *AccountSchedule {
+	for i := range c.Accounts {
+		if c.Accounts[i].Email == email {
+			acc := c.Accounts[i]
+			return &acc
+		}
+	}
+	return nil
 }
 
 // MkTempDir creates a temporary directory with fallback logic for restricted
