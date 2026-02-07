@@ -139,6 +139,15 @@ func (s *Store) InspectDisplayName(sourceMessageID, recipientType, email string)
 	return displayName, err
 }
 
+// InspectParticipantDisplayName returns the display_name from the participants table for an email.
+func (s *Store) InspectParticipantDisplayName(email string) (string, error) {
+	var displayName string
+	err := s.db.QueryRow(s.Rebind(
+		"SELECT display_name FROM participants WHERE email_address = ?"),
+		email).Scan(&displayName)
+	return displayName, err
+}
+
 // InspectDeletedFromSource checks whether a message has deleted_from_source_at set.
 func (s *Store) InspectDeletedFromSource(sourceMessageID string) (bool, error) {
 	var deletedAt sql.NullTime
@@ -186,6 +195,18 @@ func (s *Store) InspectThreadSourceID(sourceMessageID string) (string, error) {
 		WHERE m.source_message_id = ?
 	`), sourceMessageID).Scan(&threadSourceID)
 	return threadSourceID, err
+}
+
+// InspectAttachment returns the filename and mime_type for the first attachment (by ID) of a message.
+func (s *Store) InspectAttachment(sourceMessageID string) (filename, mimeType string, err error) {
+	err = s.db.QueryRow(s.Rebind(`
+		SELECT a.filename, a.mime_type FROM attachments a
+		JOIN messages m ON a.message_id = m.id
+		WHERE m.source_message_id = ?
+		ORDER BY a.id
+		LIMIT 1
+	`), sourceMessageID).Scan(&filename, &mimeType)
+	return
 }
 
 // InspectMessageDates returns sent_at and internal_date for a message.
