@@ -89,10 +89,27 @@ func ReplaceSymlink(linkPath, target string) error {
 		return fmt.Errorf("%s is not a symlink; refusing to replace (safety check)", linkPath)
 	}
 
-	// On Windows, os.Rename doesn't overwrite existing files, so we use a
-	// different strategy: remove the old symlink and create the new one directly.
-	// This is safe because we've already verified linkPath is a symlink above.
+	// On Windows, os.Rename doesn't overwrite existing files in general, but may
+	// work for symlink→symlink replacement. Try temp+rename first for atomicity,
+	// and fall back to remove+create only if rename fails.
 	if runtime.GOOS == "windows" {
+		// Use a random suffix to avoid collisions between concurrent calls.
+		var randBytes [4]byte
+		if _, err := rand.Read(randBytes[:]); err != nil {
+			return fmt.Errorf("generate random suffix: %w", err)
+		}
+		tmpPath := linkPath + ".tmp." + hex.EncodeToString(randBytes[:])
+		if err := os.Symlink(target, tmpPath); err != nil {
+			return fmt.Errorf("create temp symlink %s -> %s: %w", tmpPath, target, err)
+		}
+
+		// Try atomic rename first
+		if err := os.Rename(tmpPath, linkPath); err == nil {
+			return nil
+		}
+
+		// Rename failed - fall back to remove+create (non-atomic but verified safe above)
+		_ = os.Remove(tmpPath) // Clean up temp symlink
 		if err := os.Remove(linkPath); err != nil {
 			return fmt.Errorf("remove existing symlink %s: %w", linkPath, err)
 		}

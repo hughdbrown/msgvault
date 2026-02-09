@@ -322,8 +322,13 @@ func (m *Manager) saveToken(email string, token *oauth2.Token, scopes []string) 
 	}
 
 	// On Windows, remove existing file before rename since os.Rename doesn't overwrite.
+	// Only ignore "file not found" errors - other errors (permission denied, directory, etc.)
+	// should be reported since they would cause the rename to fail anyway.
 	if runtime.GOOS == "windows" {
-		_ = os.Remove(path) // Ignore error if file doesn't exist
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			os.Remove(tmpPath)
+			return fmt.Errorf("remove existing token file: %w", err)
+		}
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
