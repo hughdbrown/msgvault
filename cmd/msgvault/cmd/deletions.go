@@ -352,6 +352,11 @@ Examples:
 		}
 		defer s.Close()
 
+		// Ensure schema is up to date (creates new indexes, etc.)
+		if err := s.InitSchema(); err != nil {
+			return fmt.Errorf("init schema: %w", err)
+		}
+
 		// Set up context with cancellation
 		ctx, cancel := context.WithCancel(cmd.Context())
 		defer cancel()
@@ -500,19 +505,21 @@ func isTTY() bool {
 
 // CLIDeletionProgress reports deletion progress to the terminal.
 type CLIDeletionProgress struct {
-	total     int
-	startTime time.Time
-	lastPrint time.Time
-	tty       bool
+	total        int
+	resumeOffset int // messages already processed before this run
+	startTime    time.Time
+	lastPrint    time.Time
+	tty          bool
 }
 
-func (p *CLIDeletionProgress) OnStart(total int) {
+func (p *CLIDeletionProgress) OnStart(total, alreadyProcessed int) {
 	p.total = total
+	p.resumeOffset = alreadyProcessed
 	p.startTime = time.Now()
 	p.lastPrint = time.Time{} // Force first print
 	p.tty = isTTY()
 	// Show initial progress immediately so it doesn't look like it's hanging
-	p.OnProgress(0, 0, 0)
+	p.OnProgress(alreadyProcessed, 0, 0)
 }
 
 func (p *CLIDeletionProgress) formatDuration(d time.Duration) string {
@@ -537,8 +544,9 @@ func (p *CLIDeletionProgress) OnProgress(processed, succeeded, failed int) {
 	bar := p.progressBar(pct, 30)
 
 	var eta string
-	if processed > 0 && processed < p.total {
-		remaining := time.Duration(float64(elapsed) / float64(processed) * float64(p.total-processed))
+	processedThisRun := processed - p.resumeOffset
+	if processedThisRun > 0 && processed < p.total {
+		remaining := time.Duration(float64(elapsed) / float64(processedThisRun) * float64(p.total-processed))
 		eta = p.formatDuration(remaining) + " remaining"
 	} else if processed >= p.total {
 		eta = p.formatDuration(elapsed) + " elapsed"

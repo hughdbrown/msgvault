@@ -32,7 +32,7 @@ func isInsufficientScopeError(err error) bool {
 
 // Progress reports deletion progress.
 type Progress interface {
-	OnStart(total int)
+	OnStart(total, alreadyProcessed int)
 	OnProgress(processed, succeeded, failed int)
 	OnComplete(succeeded, failed int)
 }
@@ -40,7 +40,7 @@ type Progress interface {
 // NullProgress is a no-op progress reporter.
 type NullProgress struct{}
 
-func (NullProgress) OnStart(total int)                           {}
+func (NullProgress) OnStart(total, alreadyProcessed int)         {}
 func (NullProgress) OnProgress(processed, succeeded, failed int) {}
 func (NullProgress) OnComplete(succeeded, failed int)            {}
 
@@ -234,7 +234,7 @@ func (e *Executor) Execute(ctx context.Context, manifestID string, opts *Execute
 		"method", opts.Method,
 	)
 
-	e.progress.OnStart(len(manifest.GmailIDs))
+	e.progress.OnStart(len(manifest.GmailIDs), startIndex)
 
 	// Execute deletions
 	succeeded := manifest.Execution.Succeeded
@@ -316,7 +316,13 @@ func (e *Executor) ExecuteBatch(ctx context.Context, manifestID string) error {
 		"retry_ids", len(retryIDs),
 	)
 
-	e.progress.OnStart(len(manifest.GmailIDs))
+	// When retries are pending, report succeeded count (not startIndex)
+	// to avoid showing 100% while retry work is still running.
+	alreadyProcessed := startIndex
+	if len(retryIDs) > 0 {
+		alreadyProcessed = succeeded
+	}
+	e.progress.OnStart(len(manifest.GmailIDs), alreadyProcessed)
 
 	var failedIDs []string
 
@@ -324,6 +330,14 @@ func (e *Executor) ExecuteBatch(ctx context.Context, manifestID string) error {
 	if len(retryIDs) > 0 {
 		e.logger.Debug("retrying previously failed messages", "count", len(retryIDs))
 		for ri, gmailID := range retryIDs {
+			select {
+			case <-ctx.Done():
+				remaining := append(failedIDs, retryIDs[ri:]...)
+				e.saveCheckpoint(manifest, path, startIndex, succeeded, len(remaining), remaining)
+				return ctx.Err()
+			default:
+			}
+
 			result, delErr := e.deleteOne(ctx, gmailID, MethodDelete)
 			switch result {
 			case resultSuccess:
@@ -368,6 +382,13 @@ func (e *Executor) ExecuteBatch(ctx context.Context, manifestID string) error {
 			e.logger.Warn("batch delete failed, falling back to individual deletes", "start_index", i, "error", err)
 			// Fall back to individual deletes
 			for j, gmailID := range batch {
+				select {
+				case <-ctx.Done():
+					e.saveCheckpoint(manifest, path, i+j, succeeded, failed, failedIDs)
+					return ctx.Err()
+				default:
+				}
+
 				result, delErr := e.deleteOne(ctx, gmailID, MethodDelete)
 				switch result {
 				case resultSuccess:
@@ -383,11 +404,9 @@ func (e *Executor) ExecuteBatch(ctx context.Context, manifestID string) error {
 			}
 		} else {
 			succeeded += len(batch)
-			// Mark all as deleted in DB
-			for _, gmailID := range batch {
-				if markErr := e.store.MarkMessageDeletedByGmailID(true, gmailID); markErr != nil {
-					e.logger.Warn("failed to mark message as deleted in DB", "gmail_id", gmailID, "error", markErr)
-				}
+			// Mark all as deleted in DB using batch update
+			if markErr := e.store.MarkMessagesDeletedByGmailIDBatch(batch); markErr != nil {
+				e.logger.Warn("failed to mark batch as deleted in DB", "count", len(batch), "error", markErr)
 			}
 		}
 
