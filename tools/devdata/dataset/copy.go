@@ -54,26 +54,29 @@ func CopySubset(srcDBPath, dstDir string, rowCount int) (*CopyResult, error) {
 		return nil, fmt.Errorf("create destination directory: %w", err)
 	}
 
-	// cleanupDir removes the destination only if CopySubset created it.
-	cleanupDir := func() {
+	// cleanup removes what CopySubset created: the entire directory if we
+	// created it, or just the database file if the directory pre-existed.
+	cleanup := func() {
 		if createdDir {
 			_ = os.RemoveAll(dstDir)
+		} else {
+			_ = os.Remove(dstDBPath)
 		}
 	}
 
 	// Phase 1: Create destination DB with schema using store.Open + InitSchema
 	st, err := store.Open(dstDBPath)
 	if err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("create destination database: %w", err)
 	}
 	if err := st.InitSchema(); err != nil {
 		_ = st.Close()
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("initialize schema: %w", err)
 	}
 	if err := st.Close(); err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("close schema database: %w", err)
 	}
 
@@ -81,10 +84,10 @@ func CopySubset(srcDBPath, dstDir string, rowCount int) (*CopyResult, error) {
 	dsn := dstDBPath + "?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=OFF"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("reopen database: %w", err)
 	}
-	// NOTE: On error paths, cleanupDir() may remove the DB file before this
+	// NOTE: On error paths, cleanup() may remove the DB file before this
 	// deferred Close runs. That is harmless — Close on a deleted file is a no-op.
 	defer db.Close()
 
@@ -92,14 +95,14 @@ func CopySubset(srcDBPath, dstDir string, rowCount int) (*CopyResult, error) {
 	// also validate, but CopySubset is public and must not trust its inputs).
 	srcDBPath, err = filepath.Abs(filepath.Clean(srcDBPath))
 	if err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("canonicalize source path: %w", err)
 	}
 	// Reject control characters (null, newline, tab, etc.) that have no
 	// business in a filesystem path and could interfere with SQL parsing.
 	for _, r := range srcDBPath {
 		if r < 0x20 || r == 0x7F {
-			cleanupDir()
+			cleanup()
 			return nil, fmt.Errorf("source database path contains control character (0x%02X)", r)
 		}
 	}
@@ -108,14 +111,14 @@ func CopySubset(srcDBPath, dstDir string, rowCount int) (*CopyResult, error) {
 	// Attach source database
 	attachSQL := fmt.Sprintf("ATTACH DATABASE '%s' AS src", escapedSrcPath)
 	if _, err := db.Exec(attachSQL); err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("attach source database: %w", err)
 	}
 
 	// Begin transaction for bulk copy
 	tx, err := db.Begin()
 	if err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 
@@ -123,13 +126,13 @@ func CopySubset(srcDBPath, dstDir string, rowCount int) (*CopyResult, error) {
 	if err != nil {
 		_ = tx.Rollback()
 		_, _ = db.Exec("DETACH DATABASE src")
-		cleanupDir()
+		cleanup()
 		return nil, err
 	}
 
 	if err := tx.Commit(); err != nil {
 		_, _ = db.Exec("DETACH DATABASE src")
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
@@ -138,13 +141,13 @@ func CopySubset(srcDBPath, dstDir string, rowCount int) (*CopyResult, error) {
 	// We enable foreign_keys here so subsequent operations (if any) would
 	// enforce FK constraints, but the connection is about to close.
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
 	rows, err := db.Query("PRAGMA foreign_key_check")
 	if err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("foreign key check: %w", err)
 	}
 	var violations []string
@@ -158,22 +161,22 @@ func CopySubset(srcDBPath, dstDir string, rowCount int) (*CopyResult, error) {
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("iterate foreign key check: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("close foreign key check rows: %w", err)
 	}
 
 	if len(violations) > 0 {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("foreign key violations: %s", strings.Join(violations, "; "))
 	}
 
 	// Update denormalized conversation counts
 	if err := updateConversationCounts(db); err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("update conversation counts: %w", err)
 	}
 
@@ -189,7 +192,7 @@ func CopySubset(srcDBPath, dstDir string, rowCount int) (*CopyResult, error) {
 
 	// Detach source
 	if _, err := db.Exec("DETACH DATABASE src"); err != nil {
-		cleanupDir()
+		cleanup()
 		return nil, fmt.Errorf("detach source database: %w", err)
 	}
 

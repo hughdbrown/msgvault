@@ -70,8 +70,10 @@ func runExitDevData(cmd *cobra.Command, args []string) error {
 	if err := os.Rename(goldPath, path); err != nil {
 		// Try to recreate the symlink with its original target (not
 		// necessarily gold) so the user's active dataset is preserved.
-		_ = os.Symlink(originalTarget, path)
-		return fmt.Errorf("rename %s to %s: %w", goldPath, path, err)
+		if symlinkErr := os.Symlink(originalTarget, path); symlinkErr != nil {
+			return fmt.Errorf("rename %s to %s: %w (recovery also failed: %v)", goldPath, path, err, symlinkErr)
+		}
+		return fmt.Errorf("rename %s to %s: %w (symlink restored to %s)", goldPath, path, err, originalTarget)
 	}
 
 	fmt.Fprintf(os.Stderr, "devdata: exited dev mode: %s restored\n", path)

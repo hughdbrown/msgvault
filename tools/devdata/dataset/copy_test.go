@@ -215,13 +215,8 @@ func TestCopySubset_Basic(t *testing.T) {
 		t.Errorf("destination message_bodies = %d, want 5", count)
 	}
 
-	// FK check
-	rows, err := db.Query("PRAGMA foreign_keys = ON")
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows.Close()
-
+	// FK check — foreign_key_check is a standalone integrity scan that
+	// works regardless of the foreign_keys setting, so no need to enable it.
 	fkRows, err := db.Query("PRAGMA foreign_key_check")
 	if err != nil {
 		t.Fatal(err)
