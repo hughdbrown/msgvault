@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -74,8 +75,10 @@ func DatabaseSize(path string) int64 {
 
 // ReplaceSymlink atomically replaces the symlink at linkPath to point to target.
 // It uses a temp-symlink + rename pattern to avoid any TOCTOU race window:
-// os.Rename atomically replaces the old symlink, and will fail with an error
-// (not silently delete) if linkPath has become a real directory.
+// os.Rename atomically replaces the old symlink on POSIX, and will fail with
+// an error (not silently delete) if linkPath has become a real directory.
+// On Windows, os.Rename doesn't overwrite existing paths, so we fall back to
+// remove + create if rename fails with "file exists" error.
 func ReplaceSymlink(linkPath, target string) error {
 	// Fast-fail with a clear message if linkPath is not a symlink.
 	info, err := os.Lstat(linkPath)
@@ -86,10 +89,23 @@ func ReplaceSymlink(linkPath, target string) error {
 		return fmt.Errorf("%s is not a symlink; refusing to replace (safety check)", linkPath)
 	}
 
-	// Create a temporary symlink next to the target, then atomically rename
-	// it over linkPath. os.Rename on POSIX replaces an existing symlink
-	// atomically, and fails with ENOTDIR/EISDIR if linkPath has become a
-	// real directory — so no data can be lost even under a race.
+	// On Windows, os.Rename doesn't overwrite existing files, so we use a
+	// different strategy: remove the old symlink and create the new one directly.
+	// This is safe because we've already verified linkPath is a symlink above.
+	if runtime.GOOS == "windows" {
+		if err := os.Remove(linkPath); err != nil {
+			return fmt.Errorf("remove existing symlink %s: %w", linkPath, err)
+		}
+		if err := os.Symlink(target, linkPath); err != nil {
+			return fmt.Errorf("create symlink %s -> %s: %w", linkPath, target, err)
+		}
+		return nil
+	}
+
+	// On POSIX, use temp-symlink + rename for atomicity.
+	// os.Rename replaces an existing symlink atomically, and fails with
+	// ENOTDIR/EISDIR if linkPath has become a real directory — so no data
+	// can be lost even under a race.
 	// Use a random suffix to avoid collisions between concurrent calls.
 	var randBytes [4]byte
 	if _, err := rand.Read(randBytes[:]); err != nil {
