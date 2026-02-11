@@ -176,6 +176,8 @@ class Message:
         "deleted_at",
         "sender_id",
         "_conn",
+        "_changelog",
+        "_writable",
         "_sender",
         "_sender_loaded",
         "_recipients",
@@ -205,6 +207,8 @@ class Message:
         deleted_at: datetime | None,
         sender_id: int | None,
         conn: sqlite3.Connection,
+        changelog: object | None = None,
+        writable: bool = False,
     ) -> None:
         self.id = id
         self.conversation_id = conversation_id
@@ -220,6 +224,8 @@ class Message:
         self.deleted_at = deleted_at
         self.sender_id = sender_id
         self._conn = conn
+        self._changelog = changelog
+        self._writable = writable
         # Lazy-load sentinels
         self._sender: Participant | None = None
         self._sender_loaded = False
@@ -233,7 +239,13 @@ class Message:
         self._conversation_obj: Conversation | None = None
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row, conn: sqlite3.Connection) -> Message:
+    def from_row(
+        cls,
+        row: sqlite3.Row,
+        conn: sqlite3.Connection,
+        changelog: object | None = None,
+        writable: bool = False,
+    ) -> Message:
         return cls(
             id=row["id"],
             conversation_id=row["conversation_id"],
@@ -249,6 +261,8 @@ class Message:
             deleted_at=_parse_datetime(row["deleted_at"]),
             sender_id=row["sender_id"],
             conn=conn,
+            changelog=changelog,
+            writable=writable,
         )
 
     @property
@@ -370,6 +384,37 @@ class Message:
             if row:
                 self._conversation_obj = Conversation.from_row(row)
         return self._conversation_obj
+
+    # ------------------------------------------------------------------
+    # Mutations (convenience wrappers)
+    # ------------------------------------------------------------------
+
+    def _as_query(self):
+        """Create a single-message MessageQuery for this message."""
+        from msgvault_sdk.query import MessageQuery, _Filter
+
+        return MessageQuery(
+            self._conn,
+            filters=(_Filter("m.id = ?", (self.id,)),),
+            changelog=self._changelog,
+            writable=self._writable,
+            include_deleted=True,
+        )
+
+    def delete(self) -> None:
+        """Soft-delete this message."""
+        self._as_query().delete()
+        self.deleted_at = datetime.now()
+
+    def add_label(self, name: str) -> None:
+        """Add a label to this message."""
+        self._as_query().add_label(name)
+        self._labels = None  # invalidate cache
+
+    def remove_label(self, name: str) -> None:
+        """Remove a label from this message."""
+        self._as_query().remove_label(name)
+        self._labels = None  # invalidate cache
 
     def __repr__(self) -> str:
         subj = self.subject or "(no subject)"

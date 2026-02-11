@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from msgvault_sdk.changelog import ChangeLog
 from msgvault_sdk.db import connect, find_db_path
 from msgvault_sdk.errors import VaultReadOnlyError
 from msgvault_sdk.models import Account
@@ -27,6 +28,7 @@ class Vault:
         self._conn = connect(resolved, readonly=not writable)
         self._writable = writable
         self._db_path = resolved
+        self._changelog = ChangeLog(self._conn)
 
     @classmethod
     def from_config(cls, config_path: str | Path | None = None) -> Vault:
@@ -42,6 +44,11 @@ class Vault:
         return self._writable
 
     @property
+    def changelog(self) -> ChangeLog:
+        """Access the change log for reviewing and undoing mutations."""
+        return self._changelog
+
+    @property
     def accounts(self) -> list[Account]:
         rows = self._conn.execute(
             "SELECT id, source_type, identifier, display_name, last_sync_at "
@@ -49,15 +56,24 @@ class Vault:
         ).fetchall()
         return [Account.from_row(r) for r in rows]
 
+    def _make_query(self, include_deleted: bool = False) -> MessageQuery:
+        """Create a MessageQuery with this vault's connection and settings."""
+        return MessageQuery(
+            self._conn,
+            changelog=self._changelog,
+            writable=self._writable,
+            include_deleted=include_deleted,
+        )
+
     @property
     def messages(self) -> MessageQuery:
         """Return a query over all non-deleted messages."""
-        return MessageQuery(self._conn)
+        return self._make_query()
 
     @property
     def messages_including_deleted(self) -> MessageQuery:
         """Return a query over all messages, including deleted."""
-        return MessageQuery(self._conn, include_deleted=True)
+        return self._make_query(include_deleted=True)
 
     def _check_writable(self) -> None:
         """Raise VaultReadOnlyError if the vault is not writable."""

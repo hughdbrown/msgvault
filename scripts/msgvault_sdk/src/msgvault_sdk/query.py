@@ -293,7 +293,11 @@ class MessageQuery:
         sql, params = self._build_select()
         cursor = self._conn.execute(sql, params)
         for row in cursor:
-            yield Message.from_row(row, self._conn)
+            yield Message.from_row(
+                row, self._conn,
+                changelog=self._changelog,
+                writable=self._writable,
+            )
 
     def count(self) -> int:
         """Return the count of matching messages."""
@@ -311,7 +315,11 @@ class MessageQuery:
         row = self._conn.execute(sql, params).fetchone()
         if row is None:
             return None
-        return Message.from_row(row, self._conn)
+        return Message.from_row(
+            row, self._conn,
+            changelog=self._changelog,
+            writable=self._writable,
+        )
 
     def exists(self) -> bool:
         """Return True if at least one message matches."""

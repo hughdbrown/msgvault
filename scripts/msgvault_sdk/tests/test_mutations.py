@@ -6,6 +6,7 @@ import pytest
 
 from msgvault_sdk.changelog import ChangeLog
 from msgvault_sdk.errors import VaultReadOnlyError
+from msgvault_sdk.models import Message
 from msgvault_sdk.query import MessageQuery
 
 
@@ -242,3 +243,56 @@ class TestMutationUndo:
                 (mid,),
             ).fetchone()
             assert row[0] == 1
+
+
+# ------------------------------------------------------------------
+# Message-level mutations
+# ------------------------------------------------------------------
+
+
+class TestMessageMutations:
+    def test_message_delete(self, writable_mq, db_conn) -> None:
+        msg = writable_mq.first()
+        assert msg is not None
+        msg_id = msg.id
+        msg.delete()
+
+        row = db_conn.execute(
+            "SELECT deleted_at FROM messages WHERE id = ?", (msg_id,)
+        ).fetchone()
+        assert row["deleted_at"] is not None
+
+    def test_message_add_label(self, writable_mq, db_conn) -> None:
+        msg = writable_mq.first()
+        assert msg is not None
+        msg.add_label("MsgTestLabel")
+
+        row = db_conn.execute(
+            "SELECT COUNT(*) FROM message_labels ml "
+            "JOIN labels l ON l.id = ml.label_id "
+            "WHERE ml.message_id = ? AND l.name = 'MsgTestLabel'",
+            (msg.id,),
+        ).fetchone()
+        assert row[0] == 1
+
+    def test_message_remove_label(self, writable_mq, db_conn) -> None:
+        # Find a message with INBOX label
+        msg = writable_mq.filter(label="INBOX").first()
+        assert msg is not None
+        msg.remove_label("INBOX")
+
+        row = db_conn.execute(
+            "SELECT COUNT(*) FROM message_labels ml "
+            "JOIN labels l ON l.id = ml.label_id "
+            "WHERE ml.message_id = ? AND l.name = 'INBOX'",
+            (msg.id,),
+        ).fetchone()
+        assert row[0] == 0
+
+    def test_message_labels_cache_invalidated(self, writable_mq) -> None:
+        msg = writable_mq.first()
+        assert msg is not None
+        _ = msg.labels  # load cache
+        msg.add_label("CacheTest")
+        new_labels = {l.name for l in msg.labels}
+        assert "CacheTest" in new_labels

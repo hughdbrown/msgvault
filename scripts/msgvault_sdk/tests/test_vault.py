@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from msgvault_sdk.changelog import ChangeLog
 from msgvault_sdk.errors import VaultNotFoundError, VaultReadOnlyError
 from msgvault_sdk.models import Account, Message
 from msgvault_sdk.query import MessageQuery
@@ -123,3 +124,33 @@ class TestVaultMessages:
             assert len(groups) > 0
             total = sum(g.count for g in groups)
             assert total == 9
+
+
+class TestVaultChangelog:
+    def test_changelog_property(self, tmp_db) -> None:
+        with Vault(tmp_db) as v:
+            assert isinstance(v.changelog, ChangeLog)
+
+    def test_writable_mutations_through_vault(self, tmp_db) -> None:
+        with Vault(tmp_db, writable=True) as v:
+            count = v.messages.filter(sender="alice@example.com").delete()
+            assert count > 0
+            last = v.changelog.last()
+            assert last is not None
+            assert last.operation == "delete"
+
+    def test_readonly_mutations_blocked(self, tmp_db) -> None:
+        with Vault(tmp_db) as v:
+            from msgvault_sdk.errors import VaultReadOnlyError
+            import pytest
+            with pytest.raises(VaultReadOnlyError):
+                v.messages.delete()
+
+    def test_message_mutations_through_vault(self, tmp_db) -> None:
+        with Vault(tmp_db, writable=True) as v:
+            msg = v.messages.first()
+            assert msg is not None
+            msg.add_label("VaultTest")
+            last = v.changelog.last()
+            assert last.operation == "label_add"
+            assert last.details["label"] == "VaultTest"
