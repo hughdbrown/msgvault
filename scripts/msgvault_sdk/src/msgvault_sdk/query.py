@@ -355,6 +355,36 @@ class MessageQuery:
         parts_str = ", ".join(parts)
         return f"{parts_str})"
 
+    def _repr_html_(self) -> str:
+        """Jupyter notebook HTML representation showing first 10 results."""
+        msgs = list(self.limit(10))
+        total = self.count()
+
+        header = (
+            "<tr><th>ID</th><th>Date</th><th>From</th>"
+            "<th>Subject</th><th>Size</th></tr>"
+        )
+        rows = []
+        for msg in msgs:
+            sender = msg.sender
+            sender_str = sender.email if sender else ""
+            date_str = msg.sent_at.strftime("%Y-%m-%d %H:%M") if msg.sent_at else ""
+            subj = msg.subject or "(no subject)"
+            if len(subj) > 60:
+                subj = subj[:57] + "..."
+            size = f"{msg.size_estimate:,}" if msg.size_estimate else ""
+            rows.append(
+                f"<tr><td>{msg.id}</td><td>{date_str}</td>"
+                f"<td>{sender_str}</td><td>{subj}</td><td>{size}</td></tr>"
+            )
+
+        body = "\n".join(rows)
+        footer = ""
+        if total > 10:
+            footer = f"<p><em>Showing 10 of {total:,} messages</em></p>"
+
+        return f"<table>{header}\n{body}</table>\n{footer}"
+
     # ------------------------------------------------------------------
     # Mutations (require writable vault)
     # ------------------------------------------------------------------
@@ -658,3 +688,20 @@ class GroupedQuery:
 
     def __repr__(self) -> str:
         return f"GroupedQuery(field={self._field!r}, sort={self._sort_field})"
+
+    def _repr_html_(self) -> str:
+        """Jupyter notebook HTML representation."""
+        groups = list(self)
+        header = "<tr><th>Key</th><th>Count</th><th>Total Size</th></tr>"
+        rows = []
+        for g in groups[:20]:
+            size_str = f"{g.total_size:,}" if g.total_size else "0"
+            rows.append(
+                f"<tr><td>{g.key}</td><td>{g.count:,}</td>"
+                f"<td>{size_str}</td></tr>"
+            )
+        body = "\n".join(rows)
+        footer = ""
+        if len(groups) > 20:
+            footer = f"<p><em>Showing 20 of {len(groups)} groups</em></p>"
+        return f"<table>{header}\n{body}</table>\n{footer}"
