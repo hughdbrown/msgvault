@@ -6,6 +6,7 @@ import pytest
 
 from msgvault_sdk.errors import VaultNotFoundError, VaultReadOnlyError
 from msgvault_sdk.models import Account, Message
+from msgvault_sdk.query import MessageQuery
 from msgvault_sdk.vault import Vault
 
 
@@ -97,3 +98,28 @@ class TestVaultMessages:
             assert msg.subject == "Hello from Alice"
             assert msg.sender is not None
             assert msg.sender.email == "alice@example.com"
+
+    def test_messages_returns_query(self, tmp_db) -> None:
+        with Vault(tmp_db) as v:
+            assert isinstance(v.messages, MessageQuery)
+
+    def test_messages_chainable(self, tmp_db) -> None:
+        with Vault(tmp_db) as v:
+            result = v.messages.filter(sender="alice@example.com").sort_by("date")
+            assert isinstance(result, MessageQuery)
+            msgs = list(result)
+            assert len(msgs) > 0
+
+    def test_messages_including_deleted(self, tmp_db) -> None:
+        with Vault(tmp_db) as v:
+            all_msgs = list(v.messages_including_deleted)
+            assert len(all_msgs) == 10
+            ids = {m.id for m in all_msgs}
+            assert 10 in ids
+
+    def test_messages_group_by(self, tmp_db) -> None:
+        with Vault(tmp_db) as v:
+            groups = list(v.messages.group_by("sender"))
+            assert len(groups) > 0
+            total = sum(g.count for g in groups)
+            assert total == 9

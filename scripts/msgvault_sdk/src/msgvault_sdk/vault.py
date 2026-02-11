@@ -2,31 +2,12 @@
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
-from typing import Iterator
 
 from msgvault_sdk.db import connect, find_db_path
 from msgvault_sdk.errors import VaultReadOnlyError
-from msgvault_sdk.models import Account, Message
-
-
-class _MessageIterator:
-    """Simple iterator over messages (Stage 1 placeholder for MessageQuery)."""
-
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-
-    def __iter__(self) -> Iterator[Message]:
-        cursor = self._conn.execute(
-            "SELECT id, conversation_id, source_id, message_type, sent_at, "
-            "subject, snippet, is_read, is_from_me, has_attachments, "
-            "size_estimate, deleted_at, sender_id "
-            "FROM messages WHERE deleted_at IS NULL "
-            "ORDER BY sent_at DESC"
-        )
-        for row in cursor:
-            yield Message.from_row(row, self._conn)
+from msgvault_sdk.models import Account
+from msgvault_sdk.query import MessageQuery
 
 
 class Vault:
@@ -69,12 +50,14 @@ class Vault:
         return [Account.from_row(r) for r in rows]
 
     @property
-    def messages(self) -> _MessageIterator:
-        """Return an iterable over all non-deleted messages.
+    def messages(self) -> MessageQuery:
+        """Return a query over all non-deleted messages."""
+        return MessageQuery(self._conn)
 
-        In Stage 2, this will return a MessageQuery instead.
-        """
-        return _MessageIterator(self._conn)
+    @property
+    def messages_including_deleted(self) -> MessageQuery:
+        """Return a query over all messages, including deleted."""
+        return MessageQuery(self._conn, include_deleted=True)
 
     def _check_writable(self) -> None:
         """Raise VaultReadOnlyError if the vault is not writable."""
